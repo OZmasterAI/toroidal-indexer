@@ -146,4 +146,4 @@ def code_hubs(project: str, top_n: int = 10) -> list:
 # ── Entry point ──
 
 if __name__ == "__main__":
-    mcp.run(transport="sse" if _args.http else "stdio")
+    mcp.run(transport="streamable-http" if _args.http else "stdio")
