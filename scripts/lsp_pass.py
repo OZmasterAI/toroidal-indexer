@@ -22,7 +22,6 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # indexer package
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "hooks"))  # shared.lsp_client
 
 from indexer.lsp import (
     build_line_to_name_map,
@@ -33,8 +32,8 @@ from indexer.lsp import (
     store_implementation_edges,
 )
 from indexer.schema import connect_code_graph, init_code_tables, upsert_node
-from shared.lsp_client import LSPClient
-from shared.lsp_configs import CONFIGS, get_config_for_file, is_server_available
+from indexer.lsp_client import LSPClient
+from indexer.lsp_configs import CONFIGS, get_config_for_file, is_server_available
 
 logger = logging.getLogger(__name__)
 

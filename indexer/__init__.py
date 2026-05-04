@@ -33,3 +33,10 @@ from indexer.mcp_queries import (
     code_path,
     code_readers,
 )
+from indexer.lsp_client import LSPClient
+from indexer.lsp_configs import (
+    CONFIGS,
+    LSPServerConfig,
+    get_config_for_file,
+    is_server_available,
+)
