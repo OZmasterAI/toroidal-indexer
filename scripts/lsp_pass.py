@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # indexer package
 
@@ -144,7 +145,7 @@ def process_file(
         symbols_cache[uri] = symbols
 
         # Upsert file node
-        upsert_node(db, project, rel_path, os.path.basename(file_path), "file", 0)
+        upsert_node(db, project, rel_path, rel_path, "file", 0)
 
         # Steps 2-3: definition + implementation
         definition_results = []
@@ -178,7 +179,8 @@ def process_file(
                     if loc_uri and loc_uri != uri:
                         definition_results.append(
                             {
-                                "source_name": os.path.basename(file_path),
+                                "source_name": sym_name,
+                                "source_kind": kind,
                                 "source_line": pos["line"],
                                 "target_uri": loc_uri,
                                 "target_line": loc_range.get("start", {}).get(
@@ -263,7 +265,7 @@ def process_file(
                     from_name = from_item.get("name", "")
                     if from_uri and from_name:
                         from_path = os.path.relpath(
-                            from_uri.replace("file://", ""), project_root
+                            unquote(urlparse(from_uri).path), project_root
                         )
                         call_results.append(
                             {
@@ -284,7 +286,7 @@ def process_file(
                     to_name = to_item.get("name", "")
                     if to_uri and to_name:
                         to_path = os.path.relpath(
-                            to_uri.replace("file://", ""), project_root
+                            unquote(urlparse(to_uri).path), project_root
                         )
                         call_results.append(
                             {

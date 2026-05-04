@@ -119,6 +119,7 @@ def store_definition_edges(
     count = 0
     for defn in definition_results:
         source_name = defn["source_name"]
+        source_kind = defn.get("source_kind", 12)
         source_line = defn["source_line"]
         target_uri = defn["target_uri"]
         target_line = defn["target_line"]
@@ -127,7 +128,10 @@ def store_definition_edges(
         if not target_symbols:
             continue
 
-        src_node = upsert_node(db, project, file_path, source_name, "file", 0)
+        source_type = _kind_to_type(source_kind)
+        src_node = upsert_node(
+            db, project, file_path, source_name, source_type, source_line
+        )
         tgt_node = resolve_target_node(
             db, project, target_uri, target_line, target_symbols, project_root
         )
