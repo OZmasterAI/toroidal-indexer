@@ -2,7 +2,7 @@
 name = "toroidal-indexer"
 version = "0.1.0"
 description = "Structural code graph for the Torus Framework"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "surrealdb>=0.3",

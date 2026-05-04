@@ -110,4 +110,4 @@ LSP integration tests (`test_lsp_client.py`, `test_lsp_queries.py`) require pyri
 
 ## License
 
-MIT
+Apache 2.0
