@@ -55,7 +55,34 @@ SKIP_DIRS = {
 def collect_files(
     project_root: str, languages: set[str] | None = None
 ) -> dict[str, list[str]]:
-    """Walk project and group source files by language."""
+    """Collect git-tracked source files grouped by language."""
+    grouped: dict[str, list[str]] = {}
+    result = subprocess.run(
+        ["git", "ls-files"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        logger.warning("git ls-files failed, falling back to os.walk")
+        return _collect_files_walk(project_root, languages)
+    for rel in result.stdout.splitlines():
+        fpath = os.path.join(project_root, rel)
+        if not os.path.isfile(fpath):
+            continue
+        cfg = get_config_for_file(fpath)
+        if cfg is None:
+            continue
+        if languages and cfg.language_id not in languages:
+            continue
+        grouped.setdefault(cfg.language_id, []).append(fpath)
+    return grouped
+
+
+def _collect_files_walk(
+    project_root: str, languages: set[str] | None = None
+) -> dict[str, list[str]]:
+    """Fallback: walk project skipping known non-source dirs."""
     grouped: dict[str, list[str]] = {}
     for dirpath, dirnames, filenames in os.walk(project_root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
@@ -465,10 +492,10 @@ def main():
     )
     args = parser.parse_args()
 
+    logging.basicConfig(level=logging.WARNING)
     if args.verbose:
-        logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.WARNING)
+        logging.getLogger(__name__).setLevel(logging.DEBUG)
+        logging.getLogger("indexer").setLevel(logging.DEBUG)
 
     langs = set(args.languages.split(",")) if args.languages else None
     project_name = args.project_name or os.path.basename(os.path.abspath(args.project))

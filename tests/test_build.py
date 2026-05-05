@@ -162,13 +162,28 @@ class TestIncrementalBuild:
 
 
 class TestSkipsGitignored:
-    def test_skips_gitignored_files(self, db, tmp_path):
+    def test_skips_untracked_files(self, db, tmp_path):
+        subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
         (tmp_path / ".gitignore").write_text("build/\n*.pyc\n")
         build_dir = tmp_path / "build"
         build_dir.mkdir()
         (build_dir / "generated.py").write_text("def gen():\n    pass\n")
         (tmp_path / "real.py").write_text("def real():\n    pass\n")
-        subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        }
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "real.py"], capture_output=True
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "init", "--no-gpg-sign"],
+            capture_output=True,
+            env=env,
+        )
         stats = full_build(db, str(tmp_path), "gi_proj")
         nodes = db.query(
             "SELECT * FROM code_node WHERE project=$p AND name='gen'",

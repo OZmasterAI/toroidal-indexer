@@ -39,20 +39,28 @@ MANIFEST_FILES = frozenset({"go.mod", "Cargo.toml", "pyproject.toml"})
 SOURCE_EXTENSIONS = frozenset(EXTENSION_MAP.keys())
 
 
-def _is_gitignored(file_path, project_root):
-    try:
-        result = subprocess.run(
-            ["git", "check-ignore", "-q", file_path],
-            cwd=project_root,
-            capture_output=True,
-            timeout=5,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
 def _walk_source_files(project_root):
+    """Yield (full_path, rel_path) for git-tracked source files."""
+    result = subprocess.run(
+        ["git", "ls-files"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        yield from _walk_source_files_fallback(project_root)
+        return
+    for rel in result.stdout.splitlines():
+        ext = os.path.splitext(rel)[1]
+        fname = os.path.basename(rel)
+        if ext in SOURCE_EXTENSIONS or fname in MANIFEST_FILES:
+            full = os.path.join(project_root, rel)
+            if os.path.isfile(full):
+                yield full, rel
+
+
+def _walk_source_files_fallback(project_root):
+    """Fallback when not in a git repo."""
     for dirpath, dirnames, filenames in os.walk(project_root):
         dirnames[:] = [
             d
@@ -218,11 +226,7 @@ def _extract_file(project_root, rel_path, full_path):
 
 def full_build(db, project_root, project_name, fast=False):
     collected = []
-    skipped = 0
     for full_path, rel_path in _walk_source_files(project_root):
-        if _is_gitignored(rel_path, project_root):
-            skipped += 1
-            continue
         result = _extract_file(project_root, rel_path, full_path)
         if result:
             collected.append((rel_path, result))
@@ -233,7 +237,6 @@ def full_build(db, project_root, project_name, fast=False):
         edges = _batch_store(db, project_name, collected)
         return {
             "files_indexed": len(collected),
-            "files_skipped": skipped,
             "edges": edges,
         }
 
@@ -241,7 +244,7 @@ def full_build(db, project_root, project_name, fast=False):
         delete_file_nodes(db, project_name, rel_path)
     for rel_path, (nodes, edges) in collected:
         _store_results(db, project_name, rel_path, nodes, edges)
-    return {"files_indexed": len(collected), "files_skipped": skipped}
+    return {"files_indexed": len(collected)}
 
 
 def incremental_build(db, project_root, project_name, changed_files):
