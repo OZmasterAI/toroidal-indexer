@@ -36,6 +36,13 @@ CONFIGS: dict[str, LSPServerConfig] = {
         extensions=[".rs"],
         init_options={"cargo": {"buildScripts": {"enable": True}}},
     ),
+    "go": LSPServerConfig(
+        command="gopls",
+        args=["serve"],
+        language_id="go",
+        extensions=[".go"],
+        init_options={},
+    ),
 }
 
 _EXT_TO_LANG: dict[str, str] = {}
