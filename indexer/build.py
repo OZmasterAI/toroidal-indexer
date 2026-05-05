@@ -5,6 +5,10 @@ import subprocess
 
 from surrealdb import RecordID
 
+from indexer.extractors.bash import extract_bash
+from indexer.extractors.dependencies import extract_dependencies
+from indexer.extractors.go import extract_go
+from indexer.extractors.protobuf import extract_protobuf
 from indexer.extractors.python import extract_python
 from indexer.extractors.rust import extract_rust
 from indexer.extractors.typescript import extract_typescript
@@ -24,7 +28,13 @@ EXTENSION_MAP = {
     ".js": extract_typescript,
     ".jsx": extract_typescript,
     ".mjs": extract_typescript,
+    ".go": extract_go,
+    ".proto": extract_protobuf,
+    ".sh": extract_bash,
 }
+
+# Manifest files handled by the dependencies extractor (matched by basename)
+MANIFEST_FILES = frozenset({"go.mod", "Cargo.toml", "pyproject.toml"})
 
 SOURCE_EXTENSIONS = frozenset(EXTENSION_MAP.keys())
 
@@ -52,7 +62,7 @@ def _walk_source_files(project_root):
         ]
         for fname in filenames:
             ext = os.path.splitext(fname)[1]
-            if ext in SOURCE_EXTENSIONS:
+            if ext in SOURCE_EXTENSIONS or fname in MANIFEST_FILES:
                 full = os.path.join(dirpath, fname)
                 rel = os.path.relpath(full, project_root)
                 yield full, rel
@@ -190,6 +200,12 @@ def _batch_store(db, project_name, collected):
 
 
 def _extract_file(project_root, rel_path, full_path):
+    basename = os.path.basename(full_path)
+    if basename in MANIFEST_FILES:
+        try:
+            return extract_dependencies(full_path, project_root)
+        except Exception:
+            return None
     ext = os.path.splitext(full_path)[1]
     extractor = EXTENSION_MAP.get(ext)
     if not extractor:
@@ -232,8 +248,9 @@ def incremental_build(db, project_root, project_name, changed_files):
     to_index = []
     for rel_path in changed_files:
         full_path = os.path.join(project_root, rel_path)
+        basename = os.path.basename(rel_path)
         ext = os.path.splitext(rel_path)[1]
-        if ext not in SOURCE_EXTENSIONS:
+        if ext not in SOURCE_EXTENSIONS and basename not in MANIFEST_FILES:
             continue
         delete_file_nodes(db, project_name, rel_path)
         if not os.path.exists(full_path):
