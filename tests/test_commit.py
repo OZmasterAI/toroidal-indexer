@@ -8,7 +8,7 @@ import pytest
 # The hook module lives in the hooks dir and imports from indexer.schema / indexer.build.
 # We need both the toroidal-indexer root (for indexer.*) and the hooks dir (for indexer_commit).
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "hooks"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hooks"))
 
 from unittest.mock import MagicMock, patch
 

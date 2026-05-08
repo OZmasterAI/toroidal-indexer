@@ -15,7 +15,7 @@ import pytest
 
 # The hook module lives in the hooks dir; indexer.* is in the toroidal-indexer root.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "hooks"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hooks"))
 
 from surrealdb import Surreal
 
@@ -29,9 +29,7 @@ from indexer.schema import (
 )
 
 SURREAL_URL = "ws://127.0.0.1:8822"
-HOOK_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "hooks", "indexer_inject.py"
-)
+HOOK_PATH = os.path.join(os.path.dirname(__file__), "..", "hooks", "indexer_inject.py")
 
 # Module-level storage so fixtures can share the database name
 _TEST_DB_NAME = []
