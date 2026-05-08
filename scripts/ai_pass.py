@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Toroidal-Indexer Tier 3: AI-assisted edge discovery.
 
-Three-pass pipeline using Claude Code Agent tool:
+Three-pass pipeline orchestrated via SKILL.md (agent-based):
   Pass 1 (Haiku fleet): Extract explicit edges from file batches
   Pass 2 (Sonnet fleet): Find implicit coupling given Pass 1 edges
   Pass 3 (Sonnet reviewer): Structural anomaly detection + corrections
 
 Usage:
-  python3 scripts/ai_pass.py run --project .claude [--dry-run] [--batch-size 10]
-  python3 scripts/ai_pass.py store --stdin --project .claude --pass 1
+  python3 scripts/ai_pass.py run --project PATH [--dry-run] [--batch-size 10]
+  python3 scripts/ai_pass.py store --stdin --project NAME --pass 1
+  python3 scripts/ai_pass.py prompt --pass 1 --project PATH --batch 0 --batch-size 10
 """
 
 import argparse
@@ -16,6 +17,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -99,14 +101,31 @@ def parse_agent_output(text):
     return [entry for entry in raw if _validate_edge(entry)]
 
 
-def _find_source_files(project_root, extensions=(".py", ".rs", ".ts", ".tsx", ".js")):
+def _find_source_files(
+    project_root,
+    extensions=(".py", ".rs", ".ts", ".tsx", ".js", ".go", ".proto", ".sh"),
+):
+    result = subprocess.run(
+        ["git", "ls-files"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        files = [
+            rel
+            for rel in result.stdout.splitlines()
+            if any(rel.endswith(ext) for ext in extensions)
+        ]
+        return sorted(files)
+    logger.warning("git ls-files failed, falling back to os.walk")
     files = []
     for dirpath, dirnames, filenames in os.walk(project_root):
         dirnames[:] = [
             d
             for d in dirnames
             if not d.startswith(".")
-            and d not in ("node_modules", "__pycache__", "target")
+            and d not in ("node_modules", "__pycache__", "target", ".next")
         ]
         for fname in filenames:
             if any(fname.endswith(ext) for ext in extensions):
@@ -343,44 +362,64 @@ def get_graph_summary(db, project):
 
 
 def run(project_root, project_name, batch_size=10, dry_run=False):
+    """Dry-run planning only. Actual dispatch is via SKILL.md agent orchestration."""
     start = time.time()
     files = _find_source_files(project_root)
+    batches = list(_batch(files, batch_size))
     summary = {
         "project": project_name,
         "total_files": len(files),
         "batch_size": batch_size,
+        "pass1_batches": len(batches),
+        "pass2_batches": len(batches),
+        "pass3_batches": 1,
+        "estimated_agents": len(batches) * 2 + 1,
         "pass1_edges": 0,
         "pass2_edges": 0,
         "pass3_edges": 0,
         "dry_run": dry_run,
     }
 
-    if dry_run:
-        batches = list(_batch(files, batch_size))
-        summary["pass1_batches"] = len(batches)
-        summary["pass2_batches"] = len(batches)
-        summary["pass3_batches"] = 1
-        summary["estimated_agents"] = len(batches) * 2 + 1
-        summary["duration_s"] = round(time.time() - start, 2)
-        return summary
-
-    db = connect_code_graph()
-    init_code_tables(db)
-
-    for batch_files in _batch(files, batch_size):
-        _pass1_prompt(batch_files, project_root)
-        sys.stderr.write(f"[Pass1] Batch of {len(batch_files)} files\n")
-        summary["pass1_edges"] += len(batch_files)
-
-    for batch_files in _batch(files, batch_size):
-        _pass2_prompt(batch_files, [], project_root)
-        sys.stderr.write(f"[Pass2] Batch of {len(batch_files)} files\n")
-
-    _pass3_prompt({}, project_root)
-    sys.stderr.write("[Pass3] Reviewer pass\n")
+    if not dry_run:
+        sys.stderr.write(
+            "ERROR: Direct run not supported. Use the indexer-ai-pass skill "
+            "to orchestrate agent dispatch.\n"
+            "  Dry-run: python3 scripts/ai_pass.py run --project PATH --dry-run\n"
+            "  Skill:   invoke_skill('indexer-ai-pass')\n"
+        )
+        sys.exit(1)
 
     summary["duration_s"] = round(time.time() - start, 2)
     return summary
+
+
+def _prompt_command(args):
+    """Generate a prompt for a specific pass/batch (used by SKILL.md orchestration)."""
+    project_root = os.path.abspath(args.project)
+    project_name = args.project_name or os.path.basename(project_root)
+    files = _find_source_files(project_root)
+    batches = list(_batch(files, args.batch_size))
+
+    if args.pass_num == 3:
+        db = connect_code_graph()
+        summary = get_graph_summary(db, project_name)
+        print(_pass3_prompt(summary, project_root))
+        return
+
+    if args.batch_index >= len(batches):
+        sys.stderr.write(
+            f"ERROR: batch {args.batch_index} out of range (max {len(batches) - 1})\n"
+        )
+        sys.exit(1)
+
+    batch_files = batches[args.batch_index]
+
+    if args.pass_num == 1:
+        print(_pass1_prompt(batch_files, project_root))
+    elif args.pass_num == 2:
+        db = connect_code_graph()
+        known_edges = get_edges_for_files(db, project_name, list(batch_files))
+        print(_pass2_prompt(batch_files, known_edges, project_root))
 
 
 def _store_command(args):
@@ -403,7 +442,7 @@ def main():
     parser = argparse.ArgumentParser(description="Toroidal-Indexer Tier 3 AI pass")
     subparsers = parser.add_subparsers(dest="command")
 
-    run_parser = subparsers.add_parser("run", help="Run AI pass pipeline")
+    run_parser = subparsers.add_parser("run", help="Dry-run planning")
     run_parser.add_argument("--project", required=True, help="Project root path")
     run_parser.add_argument(
         "--dry-run", action="store_true", help="Show plan without executing"
@@ -414,6 +453,19 @@ def main():
     run_parser.add_argument(
         "--project-name", help="Override project name (default: basename of --project)"
     )
+
+    prompt_parser = subparsers.add_parser("prompt", help="Generate prompt for a pass")
+    prompt_parser.add_argument("--project", required=True, help="Project root path")
+    prompt_parser.add_argument(
+        "--pass", type=int, dest="pass_num", required=True, choices=[1, 2, 3]
+    )
+    prompt_parser.add_argument(
+        "--batch", type=int, dest="batch_index", default=0, help="Batch index"
+    )
+    prompt_parser.add_argument(
+        "--batch-size", type=int, default=10, help="Files per batch"
+    )
+    prompt_parser.add_argument("--project-name", help="Override project name")
 
     store_parser = subparsers.add_parser("store", help="Store edges from stdin")
     store_parser.add_argument("--stdin", action="store_true", required=True)
@@ -429,6 +481,8 @@ def main():
 
     if args.command == "store":
         _store_command(args)
+    elif args.command == "prompt":
+        _prompt_command(args)
     elif args.command == "run":
         project_root = os.path.abspath(args.project)
         project_name = args.project_name or os.path.basename(project_root)
