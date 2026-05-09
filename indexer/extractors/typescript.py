@@ -204,9 +204,13 @@ def _resolve_import(module_path: str, source_dir: str, project_root: str) -> str
     """Resolve an import path to a target string.
 
     Relative paths (starting with . or ..) are resolved to relative file paths.
+    @/ aliases (Next.js convention, maps to project root) are resolved similarly.
     Package imports are returned as-is (the package name).
     """
     if module_path.startswith("."):
         resolved = _resolve_relative(module_path, source_dir, project_root)
+        return os.path.relpath(resolved, project_root)
+    if module_path.startswith("@/"):
+        resolved = _resolve_relative("./" + module_path[2:], project_root, project_root)
         return os.path.relpath(resolved, project_root)
     return module_path
