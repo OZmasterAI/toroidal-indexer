@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """PreToolUse hook: inject structural context from Toroidal-Indexer code graph.
 
-Reads Edit/Write tool input, identifies which function is being edited via tree-sitter,
-queries SurrealDB for callers/readers, and injects context as additionalContext.
+Handles two flows:
+  Edit/Write — identifies function being edited, injects callers/readers.
+  Grep/Bash(grep) — extracts search term, returns matching graph nodes
+    so the instance gets exact file:line hits without scanning.
 Always exits 0 (fail-open, never blocks).
 """
 
@@ -10,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import warnings
 from typing import Any
@@ -159,6 +162,98 @@ def _format_reader(r):
     return f"{prefix}{name} ({fpath}:L{line})"
 
 
+_GREP_RE = re.compile(
+    r"""(?:grep|rg|ag|ack)\s+(?:.*?\s)?(?:-[A-Za-z]*\s+)*['"]?([A-Za-z_][\w.]*(?:\|[A-Za-z_][\w.]*)*)['"]?""",
+)
+
+
+def _extract_search_term(event):
+    """Extract a code-identifier search term from Grep or Bash(grep) tool input.
+
+    Returns the term (str) or None if this isn't a code search.
+    """
+    tool_name = event.get("tool_name", "")
+    tool_input = event.get("tool_input", {})
+
+    if tool_name == "Grep":
+        pattern = tool_input.get("pattern", "")
+        if pattern and re.match(r"^[A-Za-z_][\w.]*$", pattern):
+            return pattern
+        return None
+
+    if tool_name == "Bash":
+        cmd = tool_input.get("command", "")
+        if not any(g in cmd for g in ("grep", "rg ", "ag ", "ack ")):
+            return None
+        m = _GREP_RE.search(cmd)
+        if m:
+            term = m.group(1)
+            if "|" in term:
+                parts = [p for p in term.split("|") if re.match(r"^[A-Za-z_]\w*$", p)]
+                return parts[0] if parts else None
+            if re.match(r"^[A-Za-z_][\w.]*$", term):
+                return term
+        return None
+
+    return None
+
+
+def _format_node(n):
+    return f"{n.get('name', '?')} ({n.get('file', '?')}:L{n.get('line', 0)}, {n.get('type', '?')})"
+
+
+def _handle_search(event):
+    """Handle Grep/Bash search: look up term in graph, return context string or None."""
+    term = _extract_search_term(event)
+    if not term:
+        return None
+
+    session_id = os.environ.get("TORUS_SESSION_ID") or str(os.getppid())
+    dedup_key = f"search:{term}"
+    seen = _load_dedup(session_id)
+    if dedup_key in seen:
+        return None
+    seen.add(dedup_key)
+
+    from indexer.schema import connect_code_graph, get_callers
+
+    db_name = os.environ.get("INDEXER_DB", "main")
+    project, _ = _detect_project()
+    if not project:
+        _save_dedup(session_id, seen)
+        return None
+
+    db = connect_code_graph(database=db_name)
+
+    nodes = _query_rows(
+        db,
+        "SELECT * FROM code_node WHERE project=$proj AND name=$name",
+        {"proj": project, "name": term},
+    )
+    if not nodes:
+        nodes = _query_rows(
+            db,
+            "SELECT * FROM code_node WHERE name=$name LIMIT 10",
+            {"name": term},
+        )
+    if not nodes:
+        _save_dedup(session_id, seen)
+        return None
+
+    parts = []
+    for n in nodes[:10]:
+        loc = _format_node(n)
+        callers = get_callers(db, n["id"])
+        if callers:
+            caller_strs = [_format_caller(c) for c in callers[:5]]
+            parts.append(f"{loc} ← called by: {', '.join(caller_strs)}")
+        else:
+            parts.append(loc)
+
+    _save_dedup(session_id, seen)
+    return f"[graph] '{term}': " + " | ".join(parts)
+
+
 def _load_dedup(session_id):
     """Load the dedup set for this session from ramdisk."""
     path = os.path.join(RAMDISK_DIR, f"indexer_dedup_{session_id}.json")
@@ -180,12 +275,30 @@ def _save_dedup(session_id, seen):
         pass
 
 
+def _emit(context_text):
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": context_text,
+        }
+    }
+    print(json.dumps(output))
+
+
 def main():
     raw = sys.stdin.read()
     if not raw.strip():
         return
 
     event = json.loads(raw)
+    tool_name = event.get("tool_name", "")
+
+    if tool_name in ("Grep", "Bash"):
+        result = _handle_search(event)
+        if result:
+            _emit(result)
+        return
+
     tool_input = event.get("tool_input", {})
     file_path = tool_input.get("file_path", "")
     old_string = tool_input.get("old_string", "")
@@ -304,20 +417,9 @@ def main():
                         f"field '{node['name']}' read by: {', '.join(reader_strs)}"
                     )
 
-    if not parts:
-        _save_dedup(session_id, seen)
-        return
-
-    context_text = " | ".join(parts)
     _save_dedup(session_id, seen)
-
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "additionalContext": context_text,
-        }
-    }
-    print(json.dumps(output))
+    if parts:
+        _emit("Editing: " + " | ".join(parts))
 
 
 if __name__ == "__main__":
