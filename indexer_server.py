@@ -24,9 +24,12 @@ from indexer.schema import connect_code_graph
 from indexer.mcp_queries import (
     code_blast_radius as _code_blast_radius,
     code_callers as _code_callers,
+    code_cluster_members as _code_cluster_members,
+    code_clusters as _code_clusters,
     code_hubs as _code_hubs,
     code_path as _code_path,
     code_readers as _code_readers,
+    code_search as _code_search,
 )
 
 # ── Transport config ──
@@ -138,9 +141,30 @@ def code_blast_radius(project: str, file: str, function: str, depth: int = 3) ->
 
 @mcp.tool()
 @crash_proof
+def code_search(project: str, query: str, limit: int = 15) -> list:
+    """Fuzzy search: find nodes by substring match on name or file path. Accepts natural language like 'auth flow' or 'database connection'."""
+    return _code_search(_get_db(), project, query, limit=limit)
+
+
+@mcp.tool()
+@crash_proof
 def code_hubs(project: str, top_n: int = 10) -> list:
     """Most-connected nodes in the project. Returns list of {name, file, degree}."""
     return _code_hubs(_get_db(), project, top_n=top_n)
+
+
+@mcp.tool()
+@crash_proof
+def code_clusters(project: str) -> list:
+    """All clusters for a project with labels, node counts, and top members."""
+    return _code_clusters(_get_db(), project)
+
+
+@mcp.tool()
+@crash_proof
+def code_cluster_members(project: str, label: str) -> list:
+    """All nodes in clusters matching the label (substring match). Returns list of {name, file, type, line}."""
+    return _code_cluster_members(_get_db(), project, label)
 
 
 # ── Entry point ──

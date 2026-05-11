@@ -149,6 +149,77 @@ def code_blast_radius(db, project, file, function, depth=3):
     return collected
 
 
+def code_search(db, project, query, limit=15):
+    """Fuzzy search: find nodes by substring match on name or file path.
+
+    Splits query into terms and matches any term against node name or file.
+    Returns list of {name, file, line, type} sorted by relevance.
+    """
+    raw_terms = [t.strip().lower() for t in query.split() if len(t.strip()) >= 2]
+    if not raw_terms:
+        return []
+
+    stop = {
+        "the",
+        "and",
+        "for",
+        "how",
+        "does",
+        "what",
+        "show",
+        "find",
+        "all",
+        "this",
+        "with",
+        "from",
+    }
+    terms = []
+    seen_terms = set()
+    for t in raw_terms:
+        if t in stop:
+            continue
+        for candidate in (t, t[: max(4, len(t) // 2)], t[:4]):
+            if len(candidate) >= 3 and candidate not in seen_terms:
+                seen_terms.add(candidate)
+                terms.append(candidate)
+    if not terms:
+        return []
+
+    conditions = []
+    params = {"proj": project, "lim": limit}
+    for i, term in enumerate(terms[:8]):
+        key = f"t{i}"
+        params[key] = term
+        conditions.append(
+            f"(string::lowercase(name) CONTAINS ${key} OR string::lowercase(file) CONTAINS ${key})"
+        )
+
+    where = " OR ".join(conditions)
+    rows = db.query(
+        f"SELECT name, file, line, type FROM code_node "
+        f"WHERE project=$proj AND ({where}) LIMIT $lim",
+        params,
+    )
+    if not rows:
+        return []
+    seen = set()
+    results = []
+    for r in rows:
+        key = (r["name"], r["file"])
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(
+            {
+                "name": r["name"],
+                "file": r["file"],
+                "line": r.get("line", 0),
+                "type": r.get("type", "unknown"),
+            }
+        )
+    return results
+
+
 def code_hubs(db, project, top_n=10):
     """Most-connected nodes in the project, sorted by total edge degree descending.
 
@@ -170,4 +241,52 @@ def code_hubs(db, project, top_n=10):
         {"name": r["name"], "file": r["file"], "degree": r["degree"]}
         for r in rows
         if r.get("degree", 0) > 0
+    ]
+
+
+def code_clusters(db, project):
+    """All clusters for a project with labels, node counts, and top members.
+
+    Returns list of {label, node_count, key_files, key_functions}.
+    """
+    rows = db.query(
+        "SELECT label, node_count, key_files, key_functions "
+        "FROM code_cluster WHERE project=$p ORDER BY node_count DESC",
+        {"p": project},
+    )
+    if not rows:
+        return []
+    return [
+        {
+            "label": r["label"],
+            "node_count": r["node_count"],
+            "key_files": r.get("key_files", []),
+            "key_functions": r.get("key_functions", []),
+        }
+        for r in rows
+    ]
+
+
+def code_cluster_members(db, project, label):
+    """All nodes in clusters matching the label (substring match).
+
+    Returns list of {name, file, type, line, cluster_label}.
+    """
+    rows = db.query(
+        "SELECT name, file, type, line, cluster_label "
+        "FROM code_node WHERE project=$p AND cluster_label IS NOT NONE "
+        "AND string::lowercase(cluster_label) CONTAINS string::lowercase($label)",
+        {"p": project, "label": label},
+    )
+    if not rows:
+        return []
+    return [
+        {
+            "name": r["name"],
+            "file": r["file"],
+            "type": r.get("type", "unknown"),
+            "line": r.get("line", 0),
+            "cluster_label": r.get("cluster_label", ""),
+        }
+        for r in rows
     ]
