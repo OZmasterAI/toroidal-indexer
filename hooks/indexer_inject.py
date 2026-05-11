@@ -202,13 +202,8 @@ def _format_node(n):
     return f"{n.get('name', '?')} ({n.get('file', '?')}:L{n.get('line', 0)}, {n.get('type', '?')})"
 
 
-def _handle_search(event):
-    """Handle Grep/Bash search: look up term in graph, return context string or None."""
-    term = _extract_search_term(event)
-    if not term:
-        return None
-
-    session_id = os.environ.get("TORUS_SESSION_ID") or str(os.getppid())
+def _query_term(term, session_id):
+    """Look up a single identifier in the graph. Returns formatted string or None."""
     dedup_key = f"search:{term}"
     seen = _load_dedup(session_id)
     if dedup_key in seen:
@@ -219,16 +214,17 @@ def _handle_search(event):
 
     db_name = os.environ.get("INDEXER_DB", "main")
     project, _ = _detect_project()
-    if not project:
-        _save_dedup(session_id, seen)
-        return None
 
     db = connect_code_graph(database=db_name)
 
-    nodes = _query_rows(
-        db,
-        "SELECT * FROM code_node WHERE project=$proj AND name=$name",
-        {"proj": project, "name": term},
+    nodes = (
+        _query_rows(
+            db,
+            "SELECT * FROM code_node WHERE project=$proj AND name=$name",
+            {"proj": project, "name": term},
+        )
+        if project
+        else []
     )
     if not nodes:
         nodes = _query_rows(
@@ -252,6 +248,321 @@ def _handle_search(event):
 
     _save_dedup(session_id, seen)
     return f"[graph] '{term}': " + " | ".join(parts)
+
+
+_CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _camel_to_kebab(name):
+    """Convert CamelCase/camelCase to kebab-case: TorusVisualization → torus-visualization."""
+    return _CAMEL_RE.sub("-", name).lower()
+
+
+def _handle_search(event):
+    """Handle Grep/Bash search: look up term in graph, return context string or None."""
+    term = _extract_search_term(event)
+    if not term:
+        return None
+    session_id = os.environ.get("TORUS_SESSION_ID") or str(os.getppid())
+    return _query_term(term, session_id)
+
+
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+
+
+def _extract_identifiers_from_text(text, max_terms=5):
+    """Extract likely code identifiers from free text (agent prompts, etc.)."""
+    stop = {
+        "the",
+        "and",
+        "for",
+        "that",
+        "this",
+        "with",
+        "from",
+        "are",
+        "was",
+        "not",
+        "but",
+        "have",
+        "has",
+        "its",
+        "into",
+        "also",
+        "use",
+        "how",
+        "find",
+        "look",
+        "check",
+        "where",
+        "what",
+        "which",
+        "does",
+        "can",
+        "should",
+        "would",
+        "could",
+        "need",
+        "want",
+        "get",
+        "set",
+        "all",
+        "any",
+        "each",
+        "file",
+        "code",
+        "function",
+        "class",
+        "method",
+        "agent",
+        "explore",
+        "search",
+        "implementation",
+        "setup",
+        "logic",
+        "create",
+        "update",
+        "delete",
+        "read",
+        "write",
+        "run",
+        "test",
+    }
+    words = _IDENT_RE.findall(text)
+    seen = set()
+    result = []
+    for w in words:
+        wl = w.lower()
+        if wl in stop or wl in seen:
+            continue
+        if w[0].isupper() or "_" in w or any(c.isupper() for c in w[1:]):
+            seen.add(wl)
+            result.append(w)
+            if len(result) >= max_terms:
+                break
+    if len(result) < max_terms:
+        for w in words:
+            wl = w.lower()
+            if wl in stop or wl in seen:
+                continue
+            if len(w) >= 5:
+                seen.add(wl)
+                result.append(w)
+                if len(result) >= max_terms:
+                    break
+    return result
+
+
+def _handle_agent(event):
+    """Handle Agent tool: extract identifiers from prompt, return graph hits."""
+    tool_input = event.get("tool_input", {})
+    prompt = tool_input.get("prompt", "")
+    if not prompt:
+        return None
+
+    session_id = os.environ.get("TORUS_SESSION_ID") or str(os.getppid())
+    dedup_key = f"agent:{hash(prompt) & 0xFFFFFFFF:08x}"
+    seen = _load_dedup(session_id)
+    if dedup_key in seen:
+        return None
+    seen.add(dedup_key)
+
+    terms = _extract_identifiers_from_text(prompt)
+    if not terms:
+        _save_dedup(session_id, seen)
+        return None
+
+    from indexer.schema import connect_code_graph, get_callers
+
+    db_name = os.environ.get("INDEXER_DB", "main")
+    project, _ = _detect_project()
+    db = connect_code_graph(database=db_name)
+
+    all_parts = []
+    for term in terms:
+        nodes = (
+            _query_rows(
+                db,
+                "SELECT * FROM code_node WHERE project=$proj AND name=$name",
+                {"proj": project, "name": term},
+            )
+            if project
+            else []
+        )
+        if not nodes:
+            nodes = _query_rows(
+                db,
+                "SELECT * FROM code_node WHERE name CONTAINS $name LIMIT 5",
+                {"name": term},
+            )
+        if not nodes:
+            kebab = _camel_to_kebab(term)
+            if kebab != term.lower():
+                nodes = _query_rows(
+                    db,
+                    "SELECT * FROM code_node WHERE file CONTAINS $kebab LIMIT 5",
+                    {"kebab": kebab},
+                )
+            if not nodes:
+                nodes = _query_rows(
+                    db,
+                    "SELECT * FROM code_node WHERE file CONTAINS $term LIMIT 5",
+                    {"term": term.lower()},
+                )
+        if not nodes:
+            continue
+        for n in nodes[:3]:
+            loc = _format_node(n)
+            callers = get_callers(db, n["id"])
+            if callers:
+                caller_strs = [_format_caller(c) for c in callers[:3]]
+                all_parts.append(f"{loc} ← {', '.join(caller_strs)}")
+            else:
+                all_parts.append(loc)
+
+    _save_dedup(session_id, seen)
+    if not all_parts:
+        return None
+    return (
+        "[graph] Index has these locations — use Read directly instead of exploring:\n"
+        + "\n".join(f"  • {p}" for p in all_parts[:12])
+    )
+
+
+def _handle_glob(event):
+    """Handle Glob tool: match file patterns against indexed files."""
+    tool_input = event.get("tool_input", {})
+    pattern = tool_input.get("pattern", "") or tool_input.get("glob", "")
+    if not pattern:
+        return None
+
+    session_id = os.environ.get("TORUS_SESSION_ID") or str(os.getppid())
+    dedup_key = f"glob:{pattern}"
+    seen = _load_dedup(session_id)
+    if dedup_key in seen:
+        return None
+    seen.add(dedup_key)
+
+    from indexer.schema import connect_code_graph
+
+    db_name = os.environ.get("INDEXER_DB", "main")
+    project, _ = _detect_project()
+    db = connect_code_graph(database=db_name)
+
+    stem = os.path.basename(pattern).replace("*", "").replace("?", "").rstrip(".")
+    if not stem or len(stem) < 2:
+        _save_dedup(session_id, seen)
+        return None
+
+    nodes = (
+        _query_rows(
+            db,
+            "SELECT file, project FROM code_node WHERE project=$proj AND file CONTAINS $stem LIMIT 30",
+            {"proj": project, "stem": stem},
+        )
+        if project
+        else []
+    )
+    if not nodes:
+        nodes = _query_rows(
+            db,
+            "SELECT file, project FROM code_node WHERE file CONTAINS $stem LIMIT 30",
+            {"stem": stem},
+        )
+
+    _save_dedup(session_id, seen)
+    if not nodes:
+        return None
+
+    files = sorted(
+        set(
+            f"{n['project'] if isinstance(n.get('project'), str) else n.get('project', ['?'])[0]}/{n['file']}"
+            for n in nodes
+        )
+    )
+    return f"[graph] Indexed files matching '{stem}':\n" + "\n".join(
+        f"  • {f}" for f in files[:12]
+    )
+
+
+def _handle_read(event):
+    """Handle Read tool: inject file structure (functions/exports) on first read."""
+    tool_input = event.get("tool_input", {})
+    file_path = tool_input.get("file_path", "")
+    if not file_path:
+        return None
+
+    session_id = os.environ.get("TORUS_SESSION_ID") or str(os.getppid())
+    dedup_key = f"read:{file_path}"
+    seen = _load_dedup(session_id)
+    if dedup_key in seen:
+        return None
+    seen.add(dedup_key)
+
+    from indexer.schema import connect_code_graph, get_callers
+
+    db_name = os.environ.get("INDEXER_DB", "main")
+    project, project_root = _detect_project()
+    if not project:
+        _save_dedup(session_id, seen)
+        return None
+
+    rel_path = _to_relative(file_path, project_root)
+    if not rel_path:
+        _save_dedup(session_id, seen)
+        return None
+
+    db = connect_code_graph(database=db_name)
+
+    nodes = _query_rows(
+        db,
+        "SELECT * FROM code_node WHERE project=$proj AND file=$file",
+        {"proj": project, "file": rel_path},
+    )
+    if not nodes:
+        nodes = _query_rows(
+            db,
+            "SELECT * FROM code_node WHERE file=$file LIMIT 20",
+            {"file": rel_path},
+        )
+
+    _save_dedup(session_id, seen)
+    if not nodes:
+        return None
+
+    parts = []
+    has_functions = False
+    for n in nodes:
+        ntype = n.get("type", "")
+        if ntype == "function":
+            has_functions = True
+            callers = get_callers(db, n["id"])
+            if callers:
+                caller_strs = [_format_caller(c) for c in callers[:4]]
+                parts.append(
+                    f"fn:{n['name']}(L{n.get('line', '?')}) ← {', '.join(caller_strs)}"
+                )
+            else:
+                parts.append(f"fn:{n['name']}(L{n.get('line', '?')})")
+        elif ntype in ("class", "export", "field"):
+            parts.append(f"{ntype}:{n['name']}(L{n.get('line', '?')})")
+
+    if not parts and not has_functions:
+        imports = [n for n in nodes if n.get("type") == "import"]
+        exports = [n for n in nodes if n.get("type") == "export"]
+        if imports or exports:
+            for imp in imports[:5]:
+                parts.append(f"imports: {imp.get('name', '?')}")
+            for exp in exports[:5]:
+                parts.append(f"exports: {exp.get('name', '?')}")
+        else:
+            parts.append(f"({len(nodes)} nodes indexed, no function-level detail yet)")
+
+    if not parts:
+        return None
+    return f"[graph] Structure of {rel_path}:\n" + "\n".join(
+        f"  • {p}" for p in parts[:15]
+    )
 
 
 def _load_dedup(session_id):
@@ -295,6 +606,24 @@ def main():
 
     if tool_name in ("Grep", "Bash"):
         result = _handle_search(event)
+        if result:
+            _emit(result)
+        return
+
+    if tool_name == "Agent":
+        result = _handle_agent(event)
+        if result:
+            _emit(result)
+        return
+
+    if tool_name == "Glob":
+        result = _handle_glob(event)
+        if result:
+            _emit(result)
+        return
+
+    if tool_name == "Read":
+        result = _handle_read(event)
         if result:
             _emit(result)
         return
