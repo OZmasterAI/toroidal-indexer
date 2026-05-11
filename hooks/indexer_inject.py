@@ -380,35 +380,35 @@ def _handle_agent(event):
 
     all_parts = []
     for term in terms:
-        nodes = (
-            _query_rows(
-                db,
-                "SELECT * FROM code_node WHERE project=$proj AND name=$name",
-                {"proj": project, "name": term},
-            )
-            if project
-            else []
-        )
-        if not nodes:
-            nodes = _query_rows(
-                db,
-                "SELECT * FROM code_node WHERE name CONTAINS $name LIMIT 5",
-                {"name": term},
-            )
-        if not nodes:
-            kebab = _camel_to_kebab(term)
-            if kebab != term.lower():
-                nodes = _query_rows(
+        tl = term.lower()
+        stem = tl[: max(4, len(tl) // 2)] if len(tl) > 5 else tl
+        candidates = [tl]
+        if stem != tl:
+            candidates.append(stem)
+        short = tl[:4] if len(tl) > 4 else None
+        if short and short not in candidates:
+            candidates.append(short)
+        kebab = _camel_to_kebab(term)
+        if kebab != tl and kebab not in candidates:
+            candidates.append(kebab)
+
+        nodes = []
+        for c in candidates:
+            if nodes:
+                break
+            nodes = (
+                _query_rows(
                     db,
-                    "SELECT * FROM code_node WHERE file CONTAINS $kebab LIMIT 5",
-                    {"kebab": kebab},
+                    "SELECT * FROM code_node WHERE project=$proj AND (string::lowercase(name) CONTAINS $term OR string::lowercase(file) CONTAINS $term) LIMIT 5",
+                    {"proj": project, "term": c},
                 )
-            if not nodes:
-                nodes = _query_rows(
+                if project
+                else _query_rows(
                     db,
-                    "SELECT * FROM code_node WHERE file CONTAINS $term LIMIT 5",
-                    {"term": term.lower()},
+                    "SELECT * FROM code_node WHERE (string::lowercase(name) CONTAINS $term OR string::lowercase(file) CONTAINS $term) LIMIT 5",
+                    {"term": c},
                 )
+            )
         if not nodes:
             continue
         for n in nodes[:3]:
