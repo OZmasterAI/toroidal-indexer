@@ -224,6 +224,16 @@ def _extract_file(project_root, rel_path, full_path):
         return None
 
 
+def _run_clustering_safe(db, project_name):
+    try:
+        from indexer.clustering import run_clustering
+
+        result = run_clustering(db, project_name)
+        return {"clusters": result.get("clusters", 0)}
+    except Exception:
+        return {"clusters": 0}
+
+
 def full_build(db, project_root, project_name, fast=False):
     collected = []
     for full_path, rel_path in _walk_source_files(project_root):
@@ -235,16 +245,19 @@ def full_build(db, project_root, project_name, fast=False):
         files = {rel_path for rel_path, _ in collected}
         _batch_delete_project(db, project_name, files)
         edges = _batch_store(db, project_name, collected)
-        return {
+        summary = {
             "files_indexed": len(collected),
             "edges": edges,
         }
+    else:
+        for rel_path, _ in collected:
+            delete_file_nodes(db, project_name, rel_path)
+        for rel_path, (nodes, edges) in collected:
+            _store_results(db, project_name, rel_path, nodes, edges)
+        summary = {"files_indexed": len(collected)}
 
-    for rel_path, _ in collected:
-        delete_file_nodes(db, project_name, rel_path)
-    for rel_path, (nodes, edges) in collected:
-        _store_results(db, project_name, rel_path, nodes, edges)
-    return {"files_indexed": len(collected)}
+    summary.update(_run_clustering_safe(db, project_name))
+    return summary
 
 
 def incremental_build(db, project_root, project_name, changed_files):
@@ -263,7 +276,10 @@ def incremental_build(db, project_root, project_name, changed_files):
             to_index.append((rel_path, result))
     for rel_path, (nodes, edges) in to_index:
         _store_results(db, project_name, rel_path, nodes, edges)
-    return {"files_indexed": len(to_index)}
+    summary = {"files_indexed": len(to_index)}
+    if to_index:
+        summary.update(_run_clustering_safe(db, project_name))
+    return summary
 
 
 def get_changed_files(project_root):
