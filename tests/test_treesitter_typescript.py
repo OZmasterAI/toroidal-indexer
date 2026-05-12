@@ -97,6 +97,47 @@ class TestExtractCalls:
         assert "process" in call_targets
         assert "forEach" not in call_targets
 
+    def test_js_globals_skipped(self):
+        from indexer.extractors.typescript_ts import extract_typescript_ts
+
+        src = "function run() { fetch('/api'); parseInt('42'); setTimeout(fn, 100); }"
+        nodes, edges = extract_typescript_ts(src, "app.ts", "project")
+        call_targets = {e.target for e in edges if e.relation == "calls"}
+        assert "fetch" not in call_targets
+        assert "parseInt" not in call_targets
+        assert "setTimeout" not in call_targets
+        assert "fn" not in call_targets
+
+    def test_test_matchers_skipped(self):
+        from indexer.extractors.typescript_ts import extract_typescript_ts
+
+        src = "function run() { expect(x); toBe(1); toEqual(y); }"
+        nodes, edges = extract_typescript_ts(src, "test.ts", "project")
+        call_targets = {e.target for e in edges if e.relation == "calls"}
+        assert "expect" not in call_targets
+        assert "toBe" not in call_targets
+        assert "toEqual" not in call_targets
+
+    def test_react_setters_skipped(self):
+        from indexer.extractors.typescript_ts import extract_typescript_ts
+
+        src = "function Component() { setLoading(true); setFormData({}); }"
+        nodes, edges = extract_typescript_ts(src, "page.tsx", "project")
+        call_targets = {e.target for e in edges if e.relation == "calls"}
+        assert "setLoading" not in call_targets
+        assert "setFormData" not in call_targets
+
+    def test_imported_global_name_not_skipped(self):
+        from indexer.extractors.typescript_ts import extract_typescript_ts
+
+        src = "function run() { fetch('/api'); }"
+        import_map = {"fetch": ("lib/custom-fetch.ts", "fetch")}
+        nodes, edges = extract_typescript_ts(
+            src, "app.ts", "project", import_map=import_map
+        )
+        calls = [e for e in edges if e.relation == "calls"]
+        assert any(e.target == "lib/custom-fetch.ts:fetch" for e in calls)
+
 
 class TestExtractJSX:
     def test_extracts_jsx_component_calls(self):

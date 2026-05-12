@@ -134,6 +134,114 @@ def _merge_arrow_scopes(func_scopes, scope_map):
     scope_map.update(func_scopes)
 
 
+_JS_GLOBALS = frozenset(
+    {
+        "fetch",
+        "parseInt",
+        "parseFloat",
+        "encodeURIComponent",
+        "decodeURIComponent",
+        "encodeURI",
+        "decodeURI",
+        "setTimeout",
+        "setInterval",
+        "clearTimeout",
+        "clearInterval",
+        "alert",
+        "confirm",
+        "prompt",
+        "atob",
+        "btoa",
+        "isNaN",
+        "isFinite",
+        "String",
+        "Number",
+        "Boolean",
+        "BigInt",
+        "Symbol",
+        "Array",
+        "Object",
+        "Date",
+        "Error",
+        "TypeError",
+        "RangeError",
+        "Promise",
+        "RegExp",
+        "Map",
+        "Set",
+        "WeakMap",
+        "WeakSet",
+        "Proxy",
+        "Reflect",
+        "URL",
+        "URLSearchParams",
+        "Headers",
+        "Request",
+        "Response",
+        "FormData",
+        "Blob",
+        "File",
+        "AbortController",
+        "TextEncoder",
+        "TextDecoder",
+        "crypto",
+        "structuredClone",
+        "requestAnimationFrame",
+        "queueMicrotask",
+    }
+)
+
+_TEST_MATCHERS = frozenset(
+    {
+        "expect",
+        "describe",
+        "it",
+        "test",
+        "beforeEach",
+        "afterEach",
+        "beforeAll",
+        "afterAll",
+        "jest",
+        "vi",
+        "toBe",
+        "toEqual",
+        "toContain",
+        "toBeDefined",
+        "toBeUndefined",
+        "toBeTruthy",
+        "toBeFalsy",
+        "toBeNull",
+        "toBeNaN",
+        "toBeGreaterThan",
+        "toBeLessThan",
+        "toHaveLength",
+        "toHaveBeenCalled",
+        "toHaveBeenCalledWith",
+        "toHaveBeenCalledTimes",
+        "toMatchObject",
+        "toThrow",
+        "toThrowError",
+        "toHaveProperty",
+        "toContainEqual",
+        "toBeInstanceOf",
+        "toMatch",
+        "toStrictEqual",
+        "toHaveReturned",
+        "resolves",
+        "rejects",
+        "not",
+    }
+)
+
+_SKIP_CALLS = _JS_GLOBALS | _TEST_MATCHERS
+
+
+def _should_skip_call(name):
+    if name in _SKIP_CALLS:
+        return True
+    return len(name) > 3 and name.startswith("set") and name[3].isupper()
+
+
 def _is_known_symbol(name, import_map, scope_map):
     """Check if a name is an imported or locally-defined symbol."""
     if import_map and name in import_map:
@@ -172,7 +280,7 @@ def _resolve_member_call(member_node, import_map, scope_map):
     Skips calls on unknown objects (parameters, builtins) to avoid orphans.
     """
     obj_node, prop_name = _get_member_parts(member_node)
-    if not prop_name:
+    if not prop_name or _should_skip_call(prop_name):
         return None
 
     if obj_node:
@@ -200,17 +308,20 @@ def _extract_calls(node, rel_path, edges, scope_map, import_map=None):
             if import_map and name in import_map:
                 target_file, exported_name = import_map[name]
                 target = f"{target_file}:{exported_name}"
+            elif _should_skip_call(name):
+                target = None
             else:
                 target = name
-            edges.append(
-                Edge(
-                    source=source,
-                    target=target,
-                    relation="calls",
-                    confidence=1.0,
-                    source_line=line + 1,
+            if target:
+                edges.append(
+                    Edge(
+                        source=source,
+                        target=target,
+                        relation="calls",
+                        confidence=1.0,
+                        source_line=line + 1,
+                    )
                 )
-            )
         elif callee_node and callee_node.type in (
             "member_expression",
             "field_expression",
