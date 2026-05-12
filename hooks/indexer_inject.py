@@ -163,7 +163,7 @@ def _format_reader(r):
 
 
 _GREP_RE = re.compile(
-    r"""(?:grep|rg|ag|ack)\s+(?:.*?\s)?(?:-[A-Za-z]*\s+)*['"]?([A-Za-z_][\w.]*(?:\|[A-Za-z_][\w.]*)*)['"]?""",
+    r"""(?:grep|rg|ag|ack)\s+(?:.*?\s)?(?:-[A-Za-z]*\s+)*['"]?([A-Za-z_][\w.\-]*(?:\|[A-Za-z_][\w.\-]*)*)['"]?""",
 )
 
 
@@ -177,7 +177,7 @@ def _extract_search_term(event):
 
     if tool_name == "Grep":
         pattern = tool_input.get("pattern", "")
-        if pattern and re.match(r"^[A-Za-z_][\w.]*$", pattern):
+        if pattern and re.match(r"^[A-Za-z_][\w.\-]*$", pattern):
             return pattern
         return None
 
@@ -189,9 +189,11 @@ def _extract_search_term(event):
         if m:
             term = m.group(1)
             if "|" in term:
-                parts = [p for p in term.split("|") if re.match(r"^[A-Za-z_]\w*$", p)]
+                parts = [
+                    p for p in term.split("|") if re.match(r"^[A-Za-z_][\w\-]*$", p)
+                ]
                 return parts[0] if parts else None
-            if re.match(r"^[A-Za-z_][\w.]*$", term):
+            if re.match(r"^[A-Za-z_][\w.\-]*$", term):
                 return term
         return None
 
