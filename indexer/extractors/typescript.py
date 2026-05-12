@@ -59,6 +59,24 @@ RE_EXPORT_LIST = re.compile(
     re.MULTILINE,
 )
 
+# Named import with bindings: import { foo, bar as baz } from 'path'
+RE_NAMED_IMPORT_BINDINGS = re.compile(
+    r"""^import\s+(?!type\s)\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]""",
+    re.MULTILINE,
+)
+
+# Default import: import Foo from 'path' (not type-only imports)
+RE_DEFAULT_IMPORT = re.compile(
+    r"""^import\s+(?!type\s)(\w+)\s+from\s+['"]([^'"]+)['"]""",
+    re.MULTILINE,
+)
+
+# Combined: import React, { useState } from 'react'
+RE_COMBINED_IMPORT = re.compile(
+    r"""^import\s+(\w+)\s*,\s*\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]""",
+    re.MULTILINE,
+)
+
 # Top-level function (non-exported) — for export default matching
 RE_FUNCTION_DECL = re.compile(
     r"""^(?:async\s+)?function\s+(\w+)""",
@@ -98,6 +116,60 @@ def _resolve_relative(import_path: str, source_dir: str, project_root: str) -> s
     return base
 
 
+def _parse_named_bindings(bindings_str):
+    """Parse 'foo, bar as baz, type Qux' into [(exported, local), ...].
+
+    Skips type-only bindings (import { type Foo }).
+    """
+    result = []
+    for part in bindings_str.split(","):
+        part = part.strip()
+        if not part or part.startswith("type "):
+            continue
+        if " as " in part:
+            exported, local = part.split(" as ", 1)
+            exported, local = exported.strip(), local.strip()
+            if exported.isidentifier() and local.isidentifier():
+                result.append((exported, local))
+        elif part.isidentifier():
+            result.append((part, part))
+    return result
+
+
+def _extract_import_map(content, source_dir, project_root):
+    """Build mapping: local_name -> (resolved_file_path, exported_name).
+
+    Used by the tree-sitter extractor to resolve cross-file call targets.
+    """
+    import_map = {}
+
+    for match in RE_COMBINED_IMPORT.finditer(content):
+        default_name = match.group(1)
+        bindings_str = match.group(2)
+        module_path = match.group(3)
+        resolved = _resolve_import(module_path, source_dir, project_root)
+        import_map[default_name] = (resolved, default_name)
+        for exported, local in _parse_named_bindings(bindings_str):
+            import_map[local] = (resolved, exported)
+
+    for match in RE_NAMED_IMPORT_BINDINGS.finditer(content):
+        bindings_str = match.group(1)
+        module_path = match.group(2)
+        resolved = _resolve_import(module_path, source_dir, project_root)
+        for exported, local in _parse_named_bindings(bindings_str):
+            if local not in import_map:
+                import_map[local] = (resolved, exported)
+
+    for match in RE_DEFAULT_IMPORT.finditer(content):
+        local_name = match.group(1)
+        module_path = match.group(2)
+        resolved = _resolve_import(module_path, source_dir, project_root)
+        if local_name not in import_map:
+            import_map[local_name] = (resolved, local_name)
+
+    return import_map
+
+
 def extract_typescript(file_path: str, project_root: str) -> Tuple[list, list]:
     """Extract nodes and edges from a TypeScript/JavaScript file.
 
@@ -120,9 +192,12 @@ def extract_typescript(file_path: str, project_root: str) -> Tuple[list, list]:
     rel_path = os.path.relpath(file_path, project_root)
 
     import_edges = _extract_import_edges(content, filename, source_dir, project_root)
+    import_map = _extract_import_map(content, source_dir, project_root)
 
     if extract_typescript_ts is not None:
-        ts_result = extract_typescript_ts(content, rel_path, project_root)
+        ts_result = extract_typescript_ts(
+            content, rel_path, project_root, import_map=import_map
+        )
         if ts_result is not None:
             ts_nodes, ts_edges = ts_result
             return _merge_results(ts_nodes, ts_edges, import_edges)

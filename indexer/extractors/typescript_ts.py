@@ -14,10 +14,12 @@ from indexer.extractors.treesitter_base import (
 )
 
 
-def extract_typescript_ts(source, rel_path, project_root):
+def extract_typescript_ts(source, rel_path, project_root, import_map=None):
     """Extract nodes and edges from TypeScript/JavaScript source using tree-sitter.
 
     Returns (list[Node], list[Edge]) or None if tree-sitter parsing fails.
+    import_map: dict of local_name -> (resolved_file, exported_name) for
+    resolving cross-file call targets.
     """
     lang = "typescript"
     tree = ts_parse(source, lang)
@@ -35,7 +37,7 @@ def extract_typescript_ts(source, rel_path, project_root):
 
     scope_map = build_scope_map(tree.root_node, "function_declaration")
     _merge_arrow_scopes(func_scopes, scope_map)
-    _extract_calls(tree.root_node, rel_path, edges, scope_map)
+    _extract_calls(tree.root_node, rel_path, edges, scope_map, import_map)
 
     return nodes, edges
 
@@ -129,30 +131,50 @@ def _merge_arrow_scopes(func_scopes, scope_map):
     scope_map.update(func_scopes)
 
 
-def _extract_calls(node, rel_path, edges, scope_map):
+def _extract_calls(node, rel_path, edges, scope_map, import_map=None):
     if node.type == "call_expression":
         line = node.start_point[0]
         scope = find_scope(line, scope_map)
         source = scope if scope else rel_path
 
-        callees = resolve_callee_names(node)
-        for callee in callees:
+        callee_node = node.children[0] if node.children else None
+
+        if callee_node and callee_node.type == "identifier" and import_map:
+            name = callee_node.text.decode("utf-8")
+            if name in import_map:
+                target_file, exported_name = import_map[name]
+                target = f"{target_file}:{exported_name}"
+            else:
+                target = name
             edges.append(
                 Edge(
                     source=source,
-                    target=callee,
+                    target=target,
                     relation="calls",
                     confidence=1.0,
                     source_line=line + 1,
                 )
             )
+        else:
+            callees = resolve_callee_names(node)
+            for callee in callees:
+                edges.append(
+                    Edge(
+                        source=source,
+                        target=callee,
+                        relation="calls",
+                        confidence=1.0,
+                        source_line=line + 1,
+                    )
+                )
+
         for child in node.children:
             if child.type == "arguments":
-                _extract_calls(child, rel_path, edges, scope_map)
+                _extract_calls(child, rel_path, edges, scope_map, import_map)
         return
 
     for child in node.children:
-        _extract_calls(child, rel_path, edges, scope_map)
+        _extract_calls(child, rel_path, edges, scope_map, import_map)
 
 
 def _get_child_text(node, child_type):
