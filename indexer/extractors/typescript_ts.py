@@ -1,15 +1,14 @@
 """Tree-sitter TypeScript/JavaScript/TSX/JSX extractor.
 
 Extracts structural nodes (functions, arrow functions, classes, methods)
-and call edges (including chained calls like a.b().c()). Import path
-resolution is left to the regex extractor in typescript.py.
+and call edges. Import map enables cross-file call resolution; member
+expression calls are only emitted when the object is a known symbol.
 """
 
 from indexer.extractors import Edge, Node
 from indexer.extractors.treesitter_base import (
     build_scope_map,
     find_scope,
-    resolve_callee_names,
     ts_parse,
 )
 
@@ -91,22 +90,26 @@ def _walk_tree(node, rel_path, nodes, edges, func_scopes):
         _walk_tree(child, rel_path, nodes, edges, func_scopes)
 
 
+def _extract_class_method(member, rel_path, nodes, func_scopes):
+    name = _get_child_text(member, "property_identifier")
+    if name:
+        nodes.append(
+            Node(
+                name=name,
+                file=rel_path,
+                type="function",
+                line=member.start_point[0] + 1,
+            )
+        )
+        func_scopes[(member.start_point[0], member.end_point[0])] = name
+
+
 def _extract_methods(class_node, rel_path, nodes, func_scopes):
     for child in class_node.children:
         if child.type == "class_body":
             for member in child.children:
                 if member.type == "method_definition":
-                    name = _get_child_text(member, "property_identifier")
-                    if name:
-                        nodes.append(
-                            Node(
-                                name=name,
-                                file=rel_path,
-                                type="function",
-                                line=member.start_point[0] + 1,
-                            )
-                        )
-                        func_scopes[(member.start_point[0], member.end_point[0])] = name
+                    _extract_class_method(member, rel_path, nodes, func_scopes)
 
 
 def _check_arrow_function(node, rel_path, nodes, func_scopes):
@@ -131,6 +134,59 @@ def _merge_arrow_scopes(func_scopes, scope_map):
     scope_map.update(func_scopes)
 
 
+def _is_known_symbol(name, import_map, scope_map):
+    """Check if a name is an imported or locally-defined symbol."""
+    if import_map and name in import_map:
+        return True
+    return bool(scope_map and any(v == name for v in scope_map.values()))
+
+
+def _get_member_parts(member_node):
+    """Extract (object_node, property_name) from a member_expression."""
+    obj_node = None
+    prop_name = None
+    for child in member_node.children:
+        if child.type == "identifier" and obj_node is None:
+            obj_node = child
+        elif child.type in ("property_identifier", "field_identifier"):
+            prop_name = child.text.decode("utf-8")
+    return obj_node, prop_name
+
+
+def _resolve_chained_call(member_node, import_map, scope_map, prop_name):
+    """Handle foo().bar() — emit bar if foo is a known symbol."""
+    first_child = member_node.children[0] if member_node.children else None
+    if not first_child or first_child.type != "call_expression":
+        return None
+    inner_callee = first_child.children[0] if first_child.children else None
+    if inner_callee and inner_callee.type == "identifier":
+        if _is_known_symbol(inner_callee.text.decode("utf-8"), import_map, scope_map):
+            return prop_name, 0.8
+    return None
+
+
+def _resolve_member_call(member_node, import_map, scope_map):
+    """Resolve obj.method() — returns (target, confidence) or None to skip.
+
+    Only emits when the object is a known symbol (imported or in scope).
+    Skips calls on unknown objects (parameters, builtins) to avoid orphans.
+    """
+    obj_node, prop_name = _get_member_parts(member_node)
+    if not prop_name:
+        return None
+
+    if obj_node:
+        obj_name = obj_node.text.decode("utf-8")
+        if import_map and obj_name in import_map:
+            target_file, _ = import_map[obj_name]
+            return f"{target_file}:{prop_name}", 1.0
+        if _is_known_symbol(obj_name, None, scope_map):
+            return prop_name, 0.9
+        return None
+
+    return _resolve_chained_call(member_node, import_map, scope_map, prop_name)
+
+
 def _extract_calls(node, rel_path, edges, scope_map, import_map=None):
     if node.type == "call_expression":
         line = node.start_point[0]
@@ -139,9 +195,9 @@ def _extract_calls(node, rel_path, edges, scope_map, import_map=None):
 
         callee_node = node.children[0] if node.children else None
 
-        if callee_node and callee_node.type == "identifier" and import_map:
+        if callee_node and callee_node.type == "identifier":
             name = callee_node.text.decode("utf-8")
-            if name in import_map:
+            if import_map and name in import_map:
                 target_file, exported_name = import_map[name]
                 target = f"{target_file}:{exported_name}"
             else:
@@ -155,15 +211,19 @@ def _extract_calls(node, rel_path, edges, scope_map, import_map=None):
                     source_line=line + 1,
                 )
             )
-        else:
-            callees = resolve_callee_names(node)
-            for callee in callees:
+        elif callee_node and callee_node.type in (
+            "member_expression",
+            "field_expression",
+        ):
+            result = _resolve_member_call(callee_node, import_map, scope_map)
+            if result:
+                target, confidence = result
                 edges.append(
                     Edge(
                         source=source,
-                        target=callee,
+                        target=target,
                         relation="calls",
-                        confidence=1.0,
+                        confidence=confidence,
                         source_line=line + 1,
                     )
                 )

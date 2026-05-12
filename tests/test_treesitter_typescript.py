@@ -72,22 +72,21 @@ class TestExtractCalls:
         calls = [e for e in edges if e.relation == "calls"]
         assert any(e.source == "foo" and e.target == "bar" for e in calls)
 
-    def test_extracts_chained_calls(self):
+    def test_known_object_method_call_emitted(self):
         from indexer.extractors.typescript_ts import extract_typescript_ts
 
-        src = "function process() { foo.bar().baz(); }"
+        src = "function helper() {}\nfunction run() { helper.init(); }"
         nodes, edges = extract_typescript_ts(src, "utils.ts", "project")
         call_targets = {e.target for e in edges if e.relation == "calls"}
-        assert "bar" in call_targets
-        assert "baz" in call_targets
+        assert "init" in call_targets
 
-    def test_extracts_method_calls(self):
+    def test_unknown_object_calls_skipped(self):
         from indexer.extractors.typescript_ts import extract_typescript_ts
 
         src = "function run() { console.log('hi'); }"
         nodes, edges = extract_typescript_ts(src, "app.ts", "project")
         call_targets = {e.target for e in edges if e.relation == "calls"}
-        assert "log" in call_targets
+        assert "log" not in call_targets
 
     def test_call_inside_callback(self):
         from indexer.extractors.typescript_ts import extract_typescript_ts
@@ -96,7 +95,7 @@ class TestExtractCalls:
         nodes, edges = extract_typescript_ts(src, "app.ts", "project")
         call_targets = {e.target for e in edges if e.relation == "calls"}
         assert "process" in call_targets
-        assert "forEach" in call_targets
+        assert "forEach" not in call_targets
 
 
 class TestExtractJSX:
@@ -154,7 +153,7 @@ class TestCrossFileCallResolution:
         calls = [e for e in edges if e.relation == "calls"]
         assert any(e.target == "lib/auth.ts:verify" for e in calls)
 
-    def test_member_call_not_resolved_via_import_map(self):
+    def test_unknown_object_member_call_skipped(self):
         from indexer.extractors.typescript_ts import extract_typescript_ts
 
         src = "function handler() { response.json(); }"
@@ -164,7 +163,7 @@ class TestCrossFileCallResolution:
         )
         calls = [e for e in edges if e.relation == "calls"]
         assert not any("utils.ts:" in e.target for e in calls)
-        assert any(e.target == "json" for e in calls)
+        assert len(calls) == 0
 
     def test_non_imported_call_unchanged(self):
         from indexer.extractors.typescript_ts import extract_typescript_ts
@@ -200,7 +199,7 @@ class TestCrossFileCallResolution:
         calls = [e for e in edges if e.relation == "calls"]
         assert any(e.target == "lib/jwt-auth.ts:verifyToken" for e in calls)
         assert any(e.target == "lib/mongodb.ts:connectDB" for e in calls)
-        assert any(e.target == "log" for e in calls)
+        assert not any(e.target == "log" for e in calls)
 
     def test_imported_call_in_callback(self):
         from indexer.extractors.typescript_ts import extract_typescript_ts
@@ -212,6 +211,25 @@ class TestCrossFileCallResolution:
         )
         calls = [e for e in edges if e.relation == "calls"]
         assert any(e.target == "lib/utils.ts:process" for e in calls)
+
+    def test_imported_object_method_call_resolved(self):
+        from indexer.extractors.typescript_ts import extract_typescript_ts
+
+        src = "function handler() { db.query('SELECT 1'); }"
+        import_map = {"db": ("lib/database.ts", "db")}
+        nodes, edges = extract_typescript_ts(
+            src, "route.ts", "project", import_map=import_map
+        )
+        calls = [e for e in edges if e.relation == "calls"]
+        assert any(e.target == "lib/database.ts:query" for e in calls)
+
+    def test_scoped_object_method_call_resolved(self):
+        from indexer.extractors.typescript_ts import extract_typescript_ts
+
+        src = "function outer() { return 1; }\nfunction handler() { outer.run(); }"
+        nodes, edges = extract_typescript_ts(src, "app.ts", "project")
+        calls = [e for e in edges if e.relation == "calls"]
+        assert any(e.target == "run" for e in calls)
 
 
 class TestImportMapExtraction:
