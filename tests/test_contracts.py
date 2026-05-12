@@ -687,3 +687,240 @@ class TestGroupManagement:
         status = group_status(db, "status-test")
         assert "name" in status
         assert "members" in status
+
+
+# ═══════════════════════════════════════════════════════════════
+# Pattern False-Positive Prevention
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestPatternFalsePositives:
+    """Verify tightened topic/gRPC patterns reject common false positives."""
+
+    def test_topic_rejects_bare_send(self):
+        """Internal send() calls should NOT match topic producer."""
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["topic"]
+        result = match_pattern(
+            patterns,
+            file="lib/utils.ts",
+            name="pad10",
+            node_type="function",
+            callees=["send"],
+        )
+        assert result is None
+
+    def test_topic_rejects_describe_callback(self):
+        """Test files should be excluded by file_exclude_re."""
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["topic"]
+        result = match_pattern(
+            patterns,
+            file="test/helper.spec.ts",
+            name="describe",
+            node_type="function",
+            callees=["emit"],
+        )
+        assert result is None
+
+    def test_topic_rejects_httpPost(self):
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["topic"]
+        result = match_pattern(
+            patterns,
+            file="lib/http.ts",
+            name="httpPost",
+            node_type="function",
+            callees=["send"],
+        )
+        assert result is None
+
+    def test_topic_rejects_write(self):
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["topic"]
+        result = match_pattern(
+            patterns,
+            file="lib/io.ts",
+            name="write",
+            node_type="function",
+            callees=["push"],
+        )
+        assert result is None
+
+    def test_topic_matches_kafka_publish(self):
+        """Real Kafka publish call SHOULD match."""
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["topic"]
+        result = match_pattern(
+            patterns,
+            file="services/events.ts",
+            name="publishUserCreated",
+            node_type="function",
+            callees=["kafka.publish"],
+        )
+        assert result is not None
+        assert result["role"] == "provider"
+
+    def test_topic_matches_redis_publish(self):
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["topic"]
+        result = match_pattern(
+            patterns,
+            file="services/cache.py",
+            name="notify_change",
+            node_type="function",
+            callees=["redis.publish"],
+        )
+        assert result is not None
+        assert result["role"] == "provider"
+
+    def test_topic_consumer_matches_kafka_subscribe(self):
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["topic"]
+        result = match_pattern(
+            patterns,
+            file="workers/consumer.ts",
+            name="processEvents",
+            node_type="function",
+            callees=["kafka.subscribe"],
+        )
+        assert result is not None
+        assert result["role"] == "consumer"
+
+    def test_topic_consumer_rejects_bare_handle(self):
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["topic"]
+        result = match_pattern(
+            patterns,
+            file="lib/init.ts",
+            name="handleInit",
+            node_type="function",
+            callees=["handle"],
+        )
+        assert result is None
+
+    def test_topic_consumer_rejects_bare_on(self):
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["topic"]
+        result = match_pattern(
+            patterns,
+            file="lib/events.ts",
+            name="onClick",
+            node_type="function",
+            callees=["on"],
+        )
+        assert result is None
+
+    def test_grpc_rejects_handleInit(self):
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["grpc"]
+        result = match_pattern(
+            patterns,
+            file="lib/init.ts",
+            name="handleInit",
+            node_type="function",
+            callees=["handleInit"],
+        )
+        assert result is None
+
+    def test_grpc_rejects_handleUninstall(self):
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["grpc"]
+        result = match_pattern(
+            patterns,
+            file="lib/lifecycle.ts",
+            name="handleUninstall",
+            node_type="function",
+            callees=["handleUninstall"],
+        )
+        assert result is None
+
+    def test_grpc_rejects_HttpClient(self):
+        """HttpClient is HTTP, not gRPC."""
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["grpc"]
+        result = match_pattern(
+            patterns,
+            file="lib/api.ts",
+            name="fetchData",
+            node_type="function",
+            callees=["HttpClient"],
+        )
+        assert result is None
+
+    def test_grpc_matches_real_service_stub(self):
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["grpc"]
+        result = match_pattern(
+            patterns,
+            file="services/user.ts",
+            name="UserServiceClient",
+            node_type="function",
+            callees=["UserServiceStub"],
+        )
+        assert result is not None
+        assert result["role"] == "consumer"
+
+    def test_grpc_matches_grpc_client(self):
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["grpc"]
+        result = match_pattern(
+            patterns,
+            file="services/rpc.py",
+            name="grpc_channel",
+            node_type="function",
+            callees=["grpc.insecure_channel"],
+        )
+        assert result is not None
+        assert result["role"] == "consumer"
+
+    def test_solidity_function_matches_as_grpc_provider(self):
+        """Solidity public functions should register as on-chain API providers."""
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["grpc"]
+        result = match_pattern(
+            patterns,
+            file="contracts/TRSDistributor.sol",
+            name="claim",
+            node_type="function",
+        )
+        assert result is not None
+        assert result["role"] == "provider"
+        assert result["pattern_name"] == "solidity_onchain"
+
+    def test_existing_http_patterns_unchanged(self):
+        """Verify HTTP patterns still work correctly."""
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["http"]
+        # Next.js app router
+        result = match_pattern(
+            patterns, file="app/api/users/route.ts", name="GET", node_type="function"
+        )
+        assert result is not None
+        assert result["role"] == "provider"
+        # HTTP consumer
+        result = match_pattern(
+            patterns,
+            file="lib/api.ts",
+            name="fetchUsers",
+            node_type="function",
+            callees=["fetch"],
+        )
+        assert result is not None
+        assert result["role"] == "consumer"

@@ -189,22 +189,24 @@ CONTRACT_PATTERNS = {
     "topic": {
         "normalize": "topic",
         "patterns": [
-            # Pub/sub producers
+            # Pub/sub producers — require real framework callees, not bare verbs
             {
                 "name": "topic_producer",
                 "file_re": r"\.(ts|js|py|rs|go|java)$",
+                "file_exclude_re": r"(test|spec|__test__|_test)\.",
                 "name_re": r".",
-                "callee_re": r"^(publish|send|emit|produce|dispatch|broadcast|enqueue|push)",
+                "callee_re": r"(kafka\.(publish|send|produce)|nats\.(publish|request)|amqp\.(publish|sendToQueue)|bull\.(add|process)|sqs\.(sendMessage|send)|sns\.publish|pubsub\.(publish|topic)|redis\.(publish|xadd)|EventEmitter\.(emit|send)|emitter\.(emit|send)|rabbitMQ\.|eventBridge\.|kinesis\.put)",
                 "role": "provider",
                 "confidence": 0.7,
                 "contract_id_template": "topic::{name}",
             },
-            # Pub/sub consumers
+            # Pub/sub consumers — require real framework callees
             {
                 "name": "topic_consumer",
                 "file_re": r"\.(ts|js|py|rs|go|java)$",
+                "file_exclude_re": r"(test|spec|__test__|_test)\.",
                 "name_re": r".",
-                "callee_re": r"^(subscribe|consume|on|listen|receive|dequeue|poll|handle)",
+                "callee_re": r"(kafka\.(subscribe|consume|on)|nats\.(subscribe|on)|amqp\.(consume|assertQueue)|bull\.(process|on)|sqs\.(receiveMessage|receive)|sns\.subscribe|pubsub\.(subscribe|subscription)|redis\.(subscribe|xread)|EventEmitter\.on|emitter\.on|rabbitMQ\.|eventBridge\.|kinesis\.get)",
                 "role": "consumer",
                 "confidence": 0.7,
                 "contract_id_template": "topic::{name}",
@@ -224,14 +226,24 @@ CONTRACT_PATTERNS = {
                 "confidence": 0.95,
                 "contract_id_template": "grpc::{name}",
             },
-            # gRPC client stubs (consumer)
+            # gRPC client stubs (consumer) — tightened: require gRPC-specific callees
             {
                 "name": "grpc_client",
                 "file_re": r"\.(ts|js|py|rs|go|java)$",
-                "name_re": r".",
-                "callee_re": r"(Client|Stub|grpc\.|channel\.|stub\.)",
+                "name_re": r"(Client|Stub|Service|Rpc|grpc|proto)",
+                "callee_re": r"(grpc\.|\.grpc|ServiceClient|ServiceStub|_pb2_grpc\.|channel\.(unary|stream)|stub\.|\.connect\(|proto\.)",
                 "role": "consumer",
                 "confidence": 0.7,
+                "contract_id_template": "grpc::{name}",
+            },
+            # Solidity on-chain API provider — function nodes in .sol files
+            {
+                "name": "solidity_onchain",
+                "file_re": r"\.sol$",
+                "name_re": r".",
+                "node_type_re": r"function",
+                "role": "provider",
+                "confidence": 0.85,
                 "contract_id_template": "grpc::{name}",
             },
         ],
@@ -246,7 +258,13 @@ def load_contract_patterns():
 
 def _extract_path_from_file(file_path, file_re_match):
     """Extract API path from a file path using the regex match groups."""
-    if not file_re_match or not file_re_match.group(1):
+    if (
+        not file_re_match
+        or file_re_match.lastindex is None
+        or file_re_match.lastindex < 1
+    ):
+        return ""
+    if not file_re_match.group(1):
         return ""
     raw = file_re_match.group(1)
     # Strip file extension remnants
@@ -275,6 +293,11 @@ def match_pattern(
                 continue
         else:
             file_match = None
+
+        # File exclusion check (e.g. skip test files)
+        file_exclude_re = pattern.get("file_exclude_re")
+        if file_exclude_re and re.search(file_exclude_re, file):
+            continue
 
         # Node type check
         node_type_re = pattern.get("node_type_re")

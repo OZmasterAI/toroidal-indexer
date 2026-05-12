@@ -11,6 +11,7 @@ from indexer.extractors.go import extract_go
 from indexer.extractors.protobuf import extract_protobuf
 from indexer.extractors.python import extract_python
 from indexer.extractors.rust import extract_rust
+from indexer.extractors.solidity import extract_solidity
 from indexer.extractors.typescript import extract_typescript
 from indexer.schema import (
     VALID_RELATIONS,
@@ -32,6 +33,7 @@ EXTENSION_MAP = {
     ".go": extract_go,
     ".proto": extract_protobuf,
     ".sh": extract_bash,
+    ".sol": extract_solidity,
 }
 
 # Manifest files handled by the dependencies extractor (matched by basename)
