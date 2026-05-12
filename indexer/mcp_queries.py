@@ -4,6 +4,7 @@ Standalone query functions that wrap SurrealDB graph traversals.
 MCP tool decorators will be added in memory_server.py (Task 10).
 """
 
+import subprocess
 from collections import deque
 
 from surrealdb import RecordID
@@ -14,6 +15,25 @@ from indexer.schema import (
     get_readers as _schema_readers,
 )
 from indexer.embed import embed_query
+
+_TEST_SEGMENTS = (
+    "test/",
+    "tests/",
+    "spec/",
+    "specs/",
+    "__tests__/",
+    "__test__/",
+    "test_",
+    ".test.",
+    ".spec.",
+    "_test.",
+    "_spec.",
+)
+
+
+def _is_test_file(filepath):
+    lower = filepath.lower()
+    return any(seg in lower for seg in _TEST_SEGMENTS)
 
 
 def _make_rid(project, file, name):
@@ -205,6 +225,8 @@ def _bm25_seeds(db, project, terms, limit=10):
             for t in terms
             if t in r.get("name", "").lower() or t in r.get("file", "").lower()
         )
+        if _is_test_file(r.get("file", "")):
+            score *= 0.5
         scored.append((score, r))
     scored.sort(key=lambda x: -x[0])
     return [r for _, r in scored]
@@ -228,7 +250,11 @@ def _vector_seeds(db, project, question, limit=10):
 
 
 def _rrf_fuse(bm25_ranked, vector_ranked, k=60, top_n=5):
-    """Reciprocal Rank Fusion: merge two ranked lists into one."""
+    """Reciprocal Rank Fusion: merge two ranked lists into one.
+
+    Applies top-3-per-file aggregation to prevent files with many mediocre
+    matches (e.g. test files) from outranking files with one strong hit.
+    """
     scores = {}
     node_data = {}
     for rank, node in enumerate(bm25_ranked):
@@ -239,7 +265,19 @@ def _rrf_fuse(bm25_ranked, vector_ranked, k=60, top_n=5):
         nid = str(node["id"])
         scores[nid] = scores.get(nid, 0) + 1.0 / (k + rank)
         node_data[nid] = node
-    ranked = sorted(scores.items(), key=lambda x: -x[1])
+
+    # Top-3-per-file: only keep the 3 highest-scoring nodes from each file
+    by_file = {}
+    for nid, score in scores.items():
+        fpath = node_data[nid].get("file", "")
+        by_file.setdefault(fpath, []).append((score, nid))
+    kept = {}
+    for fpath, entries in by_file.items():
+        entries.sort(key=lambda x: -x[0])
+        for score, nid in entries[:3]:
+            kept[nid] = score
+
+    ranked = sorted(kept.items(), key=lambda x: -x[1])
     return [node_data[nid] for nid, _ in ranked[:top_n]]
 
 
@@ -419,21 +457,30 @@ def code_search(db, project, query, limit=15):
     if not rows:
         return []
     seen = set()
-    results = []
+    scored = []
     for r in rows:
         key = (r["name"], r["file"])
         if key in seen:
             continue
         seen.add(key)
-        results.append(
-            {
-                "name": r["name"],
-                "file": r["file"],
-                "line": r.get("line", 0),
-                "type": r.get("type", "unknown"),
-            }
+        score = sum(
+            1
+            for t in terms
+            if t in r.get("name", "").lower() or t in r.get("file", "").lower()
         )
-    return results
+        if _is_test_file(r.get("file", "")):
+            score *= 0.5
+        scored.append((score, r))
+    scored.sort(key=lambda x: -x[0])
+    return [
+        {
+            "name": r["name"],
+            "file": r["file"],
+            "line": r.get("line", 0),
+            "type": r.get("type", "unknown"),
+        }
+        for _, r in scored
+    ]
 
 
 def code_hubs(db, project, top_n=10):
@@ -506,3 +553,176 @@ def code_cluster_members(db, project, label):
         }
         for r in rows
     ]
+
+
+def _git_changed_files(project_root, base_ref="HEAD~1"):
+    """Get files changed between base_ref and HEAD."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", base_ref],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return []
+        return [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
+    except Exception:
+        return []
+
+
+def code_detect_changes(db, project, project_root, base_ref="HEAD~1", depth=2):
+    """Map git diff to affected symbols via blast radius.
+
+    1. git diff base_ref → changed files
+    2. Find all graph symbols in those files
+    3. Batch reverse-BFS to find all dependents
+    4. Return structured impact with risk level
+    """
+    changed_files = _git_changed_files(project_root, base_ref)
+    if not changed_files:
+        return {
+            "changed_files": [],
+            "changed_symbols": [],
+            "affected": [],
+            "summary": {
+                "files_changed": 0,
+                "symbols_changed": 0,
+                "total_affected": 0,
+                "risk": "NONE",
+            },
+        }
+
+    # Find all graph nodes in changed files (cap at 20 files)
+    changed_symbols = []
+    for fpath in changed_files[:20]:
+        rows = db.query(
+            "SELECT id, name, file, line, type FROM code_node "
+            "WHERE project=$p AND file=$f AND type != 'file'",
+            {"p": project, "f": fpath},
+        )
+        if rows:
+            changed_symbols.extend(rows[:10])
+
+    if not changed_symbols:
+        return {
+            "changed_files": changed_files,
+            "changed_symbols": [],
+            "affected": [],
+            "summary": {
+                "files_changed": len(changed_files),
+                "symbols_changed": 0,
+                "total_affected": 0,
+                "risk": "LOW",
+            },
+        }
+
+    # Batch reverse-BFS from all changed symbols at once
+    seed_ids = []
+    for sym in changed_symbols:
+        seed_ids.append(sym["id"])
+        file_rid = _make_rid(project, sym["file"], sym["file"])
+        seed_ids.append(file_rid)
+
+    visited = {str(s) for s in seed_ids}
+    frontier = list({str(s) for s in seed_ids})
+    affected = []
+
+    for _ in range(depth):
+        if not frontier:
+            break
+        next_frontier = []
+        for nid_str in frontier:
+            try:
+                rows = db.query(
+                    "SELECT "
+                    "  <-calls<-code_node AS callers, "
+                    "  <-imports<-code_node AS importers, "
+                    "  <-reads<-code_node AS readers, "
+                    "  <-writes<-code_node AS writers, "
+                    "  <-implements<-code_node AS implementors "
+                    "FROM $id",
+                    {
+                        "id": (
+                            RecordID.parse(nid_str)
+                            if isinstance(nid_str, str)
+                            else nid_str
+                        )
+                    },
+                )
+            except Exception:
+                continue
+            if not rows:
+                continue
+            for key in (
+                "callers",
+                "importers",
+                "readers",
+                "writers",
+                "implementors",
+            ):
+                for target in rows[0].get(key) or []:
+                    tid = (
+                        target.get("id", target) if isinstance(target, dict) else target
+                    )
+                    tid_str = str(tid)
+                    if tid_str in visited:
+                        continue
+                    visited.add(tid_str)
+                    node = db.query(
+                        "SELECT name, file, line, type FROM $id", {"id": tid}
+                    )
+                    if node:
+                        affected.append(
+                            {
+                                "name": node[0]["name"],
+                                "file": node[0]["file"],
+                                "line": node[0]["line"],
+                                "type": node[0].get("type", "unknown"),
+                            }
+                        )
+                    next_frontier.append(tid_str)
+        frontier = next_frontier
+
+    # Dedupe affected by (name, file)
+    seen = set()
+    deduped = []
+    for a in affected:
+        key = (a["name"], a["file"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(a)
+
+    # Check if any hubs are in the affected set
+    hubs = code_hubs(db, project, top_n=10)
+    hub_names = {(h["name"], h["file"]) for h in hubs}
+    hubs_hit = [a for a in deduped if (a["name"], a["file"]) in hub_names]
+
+    affected_files = {a["file"] for a in deduped}
+    n_affected = len(deduped)
+    if n_affected > 50 or hubs_hit:
+        risk = "CRITICAL"
+    elif n_affected > 20:
+        risk = "HIGH"
+    elif n_affected > 5:
+        risk = "MEDIUM"
+    else:
+        risk = "LOW"
+
+    return {
+        "changed_files": changed_files,
+        "changed_symbols": [
+            {"name": s["name"], "file": s["file"], "type": s.get("type", "unknown")}
+            for s in changed_symbols
+        ],
+        "affected": deduped,
+        "hubs_affected": [{"name": h["name"], "file": h["file"]} for h in hubs_hit],
+        "summary": {
+            "files_changed": len(changed_files),
+            "symbols_changed": len(changed_symbols),
+            "total_affected": n_affected,
+            "affected_files": len(affected_files),
+            "risk": risk,
+        },
+    }

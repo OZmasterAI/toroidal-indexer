@@ -1,4 +1,4 @@
-"""Tests for Toroidal-Indexer MCP query functions (code_callers, code_readers, code_path, code_blast_radius, code_hubs)."""
+"""Tests for Toroidal-Indexer MCP query functions (code_callers, code_readers, code_path, code_blast_radius, code_hubs, code_detect_changes, search scoring)."""
 
 import os
 import sys
@@ -9,11 +9,16 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from indexer.mcp_queries import (
+    _is_test_file,
+    _bm25_seeds,
+    _rrf_fuse,
     code_blast_radius,
     code_callers,
+    code_detect_changes,
     code_hubs,
     code_path,
     code_readers,
+    code_search,
 )
 from indexer.schema import (
     connect_code_graph,
@@ -176,3 +181,98 @@ class TestCodeHubs:
         """Unknown project returns empty list."""
         result = code_hubs(db, "nonexistent_project", top_n=5)
         assert result == []
+
+
+class TestIsTestFile:
+    def test_test_directory(self):
+        assert _is_test_file("tests/unit/auth.test.ts") is True
+
+    def test_test_prefix(self):
+        assert _is_test_file("test_helpers.py") is True
+
+    def test_spec_file(self):
+        assert _is_test_file("components/auth.spec.tsx") is True
+
+    def test_dunder_tests(self):
+        assert _is_test_file("__tests__/utils.js") is True
+
+    def test_source_file(self):
+        assert _is_test_file("lib/mongodb.ts") is False
+
+    def test_source_with_test_in_name(self):
+        assert _is_test_file("lib/contest-utils.ts") is False
+
+
+class TestBm25TestDemotion:
+    def test_test_files_scored_lower(self, db):
+        """Test files with same term matches should score lower than source files."""
+        # Seed a source node and a test node both matching "validate"
+        upsert_node(db, "proj", "lib.py", "validate", "function", 5)
+        upsert_node(db, "proj", "tests/test_lib.py", "validate", "function", 10)
+        results = _bm25_seeds(db, "proj", ["validate"], limit=10)
+        names_with_files = [(r["name"], r["file"]) for r in results]
+        # Source file should appear before test file
+        src_idx = next(
+            (
+                i
+                for i, (n, f) in enumerate(names_with_files)
+                if "tests/" not in f and n == "validate"
+            ),
+            None,
+        )
+        test_idx = next(
+            (
+                i
+                for i, (n, f) in enumerate(names_with_files)
+                if "tests/" in f and n == "validate"
+            ),
+            None,
+        )
+        if src_idx is not None and test_idx is not None:
+            assert src_idx < test_idx
+
+
+class TestCodeSearch:
+    def test_returns_results(self, db):
+        result = code_search(db, "proj", "validate")
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        assert all("name" in r and "file" in r for r in result)
+
+    def test_test_files_ranked_lower(self, db):
+        """Source files should appear before test files for same query."""
+        result = code_search(db, "proj", "validate")
+        files = [r["file"] for r in result]
+        src_files = [f for f in files if not _is_test_file(f)]
+        test_files = [f for f in files if _is_test_file(f)]
+        if src_files and test_files:
+            first_src = files.index(src_files[0])
+            first_test = files.index(test_files[0])
+            assert first_src < first_test
+
+
+class TestRrfTopPerFile:
+    def test_caps_nodes_per_file(self):
+        """RRF should keep at most 3 nodes from the same file."""
+        bm25 = [{"id": f"n{i}", "name": f"fn{i}", "file": "same.py"} for i in range(5)]
+        vec = []
+        result = _rrf_fuse(bm25, vec, top_n=5)
+        same_file = [r for r in result if r["file"] == "same.py"]
+        assert len(same_file) <= 3
+
+
+class TestCodeDetectChanges:
+    def test_no_changes_returns_none_risk(self, db):
+        """Non-existent project root returns NONE risk."""
+        result = code_detect_changes(db, "proj", "/nonexistent/path")
+        assert result["summary"]["risk"] == "NONE"
+        assert result["changed_files"] == []
+
+    def test_structure(self, db):
+        """Result has expected keys."""
+        result = code_detect_changes(db, "proj", "/nonexistent/path")
+        assert "changed_files" in result
+        assert "changed_symbols" in result
+        assert "affected" in result
+        assert "summary" in result
+        assert "risk" in result["summary"]

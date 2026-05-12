@@ -26,6 +26,7 @@ from indexer.mcp_queries import (
     code_callers as _code_callers,
     code_cluster_members as _code_cluster_members,
     code_clusters as _code_clusters,
+    code_detect_changes as _code_detect_changes,
     code_hubs as _code_hubs,
     code_path as _code_path,
     code_query as _code_query,
@@ -176,6 +177,20 @@ def code_query(
     """Answer a codebase question via graph traversal. Returns compact text with nodes and edges within a token budget. Use this for natural language questions instead of multiple search+read calls."""
     return _code_query(
         _get_db(), project, question, mode=mode, depth=depth, budget=budget
+    )
+
+
+@mcp.tool()
+@crash_proof
+def code_detect_changes(
+    project: str,
+    project_root: str,
+    base_ref: str = "HEAD~1",
+    depth: int = 2,
+) -> dict:
+    """Map git diff to blast radius. Returns changed files, affected symbols, hub impacts, and risk level (NONE/LOW/MEDIUM/HIGH/CRITICAL). Use after commits to see what might break."""
+    return _code_detect_changes(
+        _get_db(), project, project_root, base_ref=base_ref, depth=depth
     )
 
 
