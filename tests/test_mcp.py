@@ -113,10 +113,13 @@ class TestCodePath:
         assert result[0]["name"] == "main"
         assert result[-1]["name"] == "check"
 
-    def test_returns_empty_for_no_path(self, db):
-        """No path from check back to main (directed graph)."""
+    def test_finds_reverse_path(self, db):
+        """Bidirectional BFS finds path from check back to main via reverse edges."""
         result = code_path(db, "proj", "lib.py", "check", "app.py", "main")
-        assert result == []
+        assert isinstance(result, list)
+        assert len(result) >= 2
+        assert result[0]["name"] == "check"
+        assert result[-1]["name"] == "main"
 
     def test_direct_neighbors(self, db):
         """Path from main to process is just 2 nodes."""
@@ -128,23 +131,23 @@ class TestCodePath:
 
 class TestCodeBlastRadius:
     def test_returns_transitive_dependents(self, db):
-        """Blast radius of validate() should include check() (it calls check)."""
+        """Blast radius of validate() returns upstream callers (process, helper, main)."""
         result = code_blast_radius(db, "proj", "lib.py", "validate")
         assert isinstance(result, list)
         names = {n["name"] for n in result}
-        assert "check" in names
+        assert "process" in names
+        assert "helper" in names
 
     def test_depth_limits_reach(self, db):
-        """Blast radius of main() at depth=1 should include process but not validate."""
-        result = code_blast_radius(db, "proj", "app.py", "main", depth=1)
+        """Blast radius of check() at depth=1 returns only direct caller (validate)."""
+        result = code_blast_radius(db, "proj", "lib.py", "check", depth=1)
         names = {n["name"] for n in result}
-        assert "process" in names
-        # At depth=1 only direct callees, so validate should not appear via calls
-        # (main calls process, but doesn't directly call validate)
+        assert "validate" in names
+        assert "process" not in names
 
-    def test_returns_empty_for_leaf(self, db):
-        """check() calls nothing, so blast radius is empty."""
-        result = code_blast_radius(db, "proj", "lib.py", "check")
+    def test_returns_empty_for_root(self, db):
+        """main() has no callers, so blast radius is empty."""
+        result = code_blast_radius(db, "proj", "app.py", "main")
         assert result == []
 
 
