@@ -179,6 +179,78 @@ def code_query(
     )
 
 
+# ── MCP Resources (pre-computed summaries, cheaper than GRAPH_REPORT.md) ──
+
+
+@mcp.resource("indexer://project/{name}/context")
+def project_context(name: str) -> str:
+    """Project overview: node/edge/file counts, top 5 hubs, last index timestamp. ~150 tokens."""
+    db = _get_db()
+    nodes = db.query(
+        "SELECT count() AS c FROM code_node WHERE project=$p GROUP ALL", {"p": name}
+    )
+    node_count = nodes[0]["c"] if nodes else 0
+
+    edge_count = 0
+    for rel in ("calls", "imports", "reads", "writes", "implements"):
+        rows = db.query(
+            f"SELECT count() AS c FROM {rel} WHERE in.project=$p GROUP ALL", {"p": name}
+        )
+        edge_count += rows[0]["c"] if rows else 0
+
+    files = db.query(
+        "SELECT count() AS c FROM code_node WHERE project=$p AND type='file' GROUP ALL",
+        {"p": name},
+    )
+    file_count = files[0]["c"] if files else 0
+
+    hubs = _code_hubs(db, name, top_n=5)
+    hub_lines = [f"  {h['name']} ({h['file']}) deg={h['degree']}" for h in hubs]
+
+    clusters = db.query(
+        "SELECT count() AS c FROM code_cluster WHERE project=$p GROUP ALL", {"p": name}
+    )
+    cluster_count = clusters[0]["c"] if clusters else 0
+
+    return (
+        f"Project: {name}\n"
+        f"Nodes: {node_count} | Edges: {edge_count} | Files: {file_count} | Clusters: {cluster_count}\n"
+        f"Top hubs:\n" + "\n".join(hub_lines)
+    )
+
+
+@mcp.resource("indexer://project/{name}/clusters")
+def project_clusters(name: str) -> str:
+    """All clusters with node counts and top 3 key files each. ~300 tokens."""
+    db = _get_db()
+    rows = db.query(
+        "SELECT label, node_count, key_files, key_functions "
+        "FROM code_cluster WHERE project=$p ORDER BY node_count DESC",
+        {"p": name},
+    )
+    if not rows:
+        return f"No clusters for {name}."
+    lines = [f"Clusters for {name} ({len(rows)} total):"]
+    for r in rows:
+        files = r.get("key_files", [])[:3]
+        files_str = ", ".join(files) if files else "(none)"
+        lines.append(f"  [{r.get('node_count', 0)}] {r['label']}: {files_str}")
+    return "\n".join(lines)
+
+
+@mcp.resource("indexer://project/{name}/hubs")
+def project_hubs(name: str) -> str:
+    """Top 10 most-connected nodes with degree and file path. ~200 tokens."""
+    db = _get_db()
+    hubs = _code_hubs(db, name, top_n=10)
+    if not hubs:
+        return f"No hubs for {name}."
+    lines = [f"Top hubs for {name}:"]
+    for h in hubs:
+        lines.append(f"  {h['name']} deg={h['degree']} {h['file']}")
+    return "\n".join(lines)
+
+
 # ── Entry point ──
 
 if __name__ == "__main__":

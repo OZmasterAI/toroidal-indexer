@@ -19,6 +19,7 @@ from indexer.schema import (
     relate,
     upsert_node,
 )
+from indexer.embed import embed_texts
 
 EXTENSION_MAP = {
     ".py": extract_python,
@@ -224,6 +225,29 @@ def _extract_file(project_root, rel_path, full_path):
         return None
 
 
+def _embed_nodes(db, project_name, batch_size=50):
+    """Generate embeddings for all code_nodes missing an embedding vector."""
+    nodes = db.query(
+        "SELECT id, name, file, type FROM code_node "
+        "WHERE project=$p AND (embedding IS NONE OR embedding = NONE)",
+        {"p": project_name},
+    )
+    if not nodes:
+        return 0
+
+    texts = [f"{n['name']} {n['file']} {n['type']}" for n in nodes]
+    vectors = embed_texts(texts)
+    if vectors is None:
+        return 0
+
+    for i, node in enumerate(nodes):
+        db.query(
+            "UPDATE $id SET embedding=$vec",
+            {"id": node["id"], "vec": vectors[i]},
+        )
+    return len(nodes)
+
+
 def _run_clustering_safe(db, project_name):
     try:
         from indexer.clustering import run_clustering
@@ -266,6 +290,10 @@ def full_build(db, project_root, project_name, fast=False):
         summary = {"files_indexed": len(collected)}
 
     summary.update(_run_clustering_safe(db, project_name))
+    try:
+        summary["embedded"] = _embed_nodes(db, project_name)
+    except Exception:
+        summary["embedded"] = 0
     _generate_report_safe(db, project_name, project_root)
     return summary
 
@@ -289,6 +317,10 @@ def incremental_build(db, project_root, project_name, changed_files):
     summary = {"files_indexed": len(to_index)}
     if to_index:
         summary.update(_run_clustering_safe(db, project_name))
+        try:
+            summary["embedded"] = _embed_nodes(db, project_name)
+        except Exception:
+            summary["embedded"] = 0
         _generate_report_safe(db, project_name, project_root)
     return summary
 

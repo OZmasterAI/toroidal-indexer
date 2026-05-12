@@ -13,6 +13,7 @@ from indexer.schema import (
     get_callers as _schema_callers,
     get_readers as _schema_readers,
 )
+from indexer.embed import embed_query
 
 
 def _make_rid(project, file, name):
@@ -179,11 +180,75 @@ def code_blast_radius(db, project, file, function, depth=3):
     return collected
 
 
+def _bm25_seeds(db, project, terms, limit=10):
+    """Substring match scored by term frequency. Returns ranked list of nodes."""
+    conditions = []
+    params = {"proj": project}
+    for i, term in enumerate(terms[:6]):
+        key = f"t{i}"
+        params[key] = term
+        conditions.append(
+            f"(string::lowercase(name) CONTAINS ${key} OR string::lowercase(file) CONTAINS ${key})"
+        )
+    where = " OR ".join(conditions)
+    rows = db.query(
+        f"SELECT id, name, file, line, type FROM code_node "
+        f"WHERE project=$proj AND ({where}) LIMIT {limit}",
+        params,
+    )
+    if not rows:
+        return []
+    scored = []
+    for r in rows:
+        score = sum(
+            1
+            for t in terms
+            if t in r.get("name", "").lower() or t in r.get("file", "").lower()
+        )
+        scored.append((score, r))
+    scored.sort(key=lambda x: -x[0])
+    return [r for _, r in scored]
+
+
+def _vector_seeds(db, project, question, limit=10):
+    """Embed the question and find nearest code_nodes by cosine similarity."""
+    qvec = embed_query(question)
+    if qvec is None:
+        return []
+    try:
+        rows = db.query(
+            f"SELECT id, name, file, line, type, vector::distance::knn() AS dist "
+            f"FROM code_node WHERE embedding <|{limit}, COSINE|> $vec "
+            f"AND project=$proj ORDER BY dist ASC",
+            {"vec": qvec, "proj": project},
+        )
+        return rows if rows else []
+    except Exception:
+        return []
+
+
+def _rrf_fuse(bm25_ranked, vector_ranked, k=60, top_n=5):
+    """Reciprocal Rank Fusion: merge two ranked lists into one."""
+    scores = {}
+    node_data = {}
+    for rank, node in enumerate(bm25_ranked):
+        nid = str(node["id"])
+        scores[nid] = scores.get(nid, 0) + 1.0 / (k + rank)
+        node_data[nid] = node
+    for rank, node in enumerate(vector_ranked):
+        nid = str(node["id"])
+        scores[nid] = scores.get(nid, 0) + 1.0 / (k + rank)
+        node_data[nid] = node
+    ranked = sorted(scores.items(), key=lambda x: -x[1])
+    return [node_data[nid] for nid, _ in ranked[:top_n]]
+
+
 def code_query(db, project, question, mode="bfs", depth=2, budget=2000):
     """Answer a codebase question by traversing the graph.
 
-    Scores nodes by term match, picks top seeds, runs BFS/DFS,
-    and returns a compact text summary within a token budget.
+    Hybrid seed selection: BM25 substring match + vector similarity,
+    fused via Reciprocal Rank Fusion. Falls back to BM25-only if
+    embeddings are unavailable.
     """
     terms = [t.lower() for t in question.split() if len(t) > 2]
     stop = {
@@ -208,22 +273,16 @@ def code_query(db, project, question, mode="bfs", depth=2, budget=2000):
     if not terms:
         return "No meaningful search terms found."
 
-    # Score all nodes by term match
-    conditions = []
-    params = {"proj": project}
-    for i, term in enumerate(terms[:6]):
-        key = f"t{i}"
-        params[key] = term
-        conditions.append(
-            f"(string::lowercase(name) CONTAINS ${key} OR string::lowercase(file) CONTAINS ${key})"
-        )
-    where = " OR ".join(conditions)
-    seeds = db.query(
-        f"SELECT id, name, file, line, type FROM code_node "
-        f"WHERE project=$proj AND ({where}) LIMIT 5",
-        params,
-    )
-    if not seeds:
+    bm25 = _bm25_seeds(db, project, terms, limit=10)
+    vec = _vector_seeds(db, project, question, limit=10)
+
+    if bm25 and vec:
+        seeds = _rrf_fuse(bm25, vec, top_n=5)
+    elif bm25:
+        seeds = bm25[:5]
+    elif vec:
+        seeds = vec[:5]
+    else:
         return f"No nodes matching '{question}'."
 
     seed_ids = [r["id"] for r in seeds]
