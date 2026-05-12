@@ -28,6 +28,7 @@ from indexer.mcp_queries import (
     code_clusters as _code_clusters,
     code_hubs as _code_hubs,
     code_path as _code_path,
+    code_query as _code_query,
     code_readers as _code_readers,
     code_search as _code_search,
 )
@@ -165,6 +166,17 @@ def code_clusters(project: str) -> list:
 def code_cluster_members(project: str, label: str) -> list:
     """All nodes in clusters matching the label (substring match). Returns list of {name, file, type, line}."""
     return _code_cluster_members(_get_db(), project, label)
+
+
+@mcp.tool()
+@crash_proof
+def code_query(
+    project: str, question: str, mode: str = "bfs", depth: int = 2, budget: int = 2000
+) -> str:
+    """Answer a codebase question via graph traversal. Returns compact text with nodes and edges within a token budget. Use this for natural language questions instead of multiple search+read calls."""
+    return _code_query(
+        _get_db(), project, question, mode=mode, depth=depth, budget=budget
+    )
 
 
 # ── Entry point ──

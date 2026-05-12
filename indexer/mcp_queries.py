@@ -60,14 +60,31 @@ def code_path(db, project, from_file, from_name, to_file, to_name):
 
     while queue:
         current = queue.popleft()
-        # Get forward neighbors via calls edges
+        # Get neighbors via all edge types, both directions
         rows = db.query(
-            "SELECT ->calls->code_node AS targets FROM $id",
+            "SELECT "
+            "  ->calls->code_node AS fwd_calls, "
+            "  <-calls<-code_node AS rev_calls, "
+            "  ->imports->code_node AS fwd_imports, "
+            "  <-imports<-code_node AS rev_imports, "
+            "  ->reads->code_node AS fwd_reads, "
+            "  <-reads<-code_node AS rev_reads "
+            "FROM $id",
             {"id": current},
         )
-        if not rows or not rows[0].get("targets"):
+        if not rows:
             continue
-        for target in rows[0]["targets"]:
+        all_neighbors = []
+        for key in (
+            "fwd_calls",
+            "rev_calls",
+            "fwd_imports",
+            "rev_imports",
+            "fwd_reads",
+            "rev_reads",
+        ):
+            all_neighbors.extend(rows[0].get(key) or [])
+        for target in all_neighbors:
             # target may be a RecordID or a dict with id field
             if isinstance(target, dict):
                 tid = target.get("id", target)
@@ -105,26 +122,40 @@ def code_path(db, project, from_file, from_name, to_file, to_name):
 
 
 def code_blast_radius(db, project, file, function, depth=3):
-    """Transitive dependents -- everything downstream that could break if this changes.
+    """Transitive dependents -- everything that could break if this changes.
 
-    Forward traversal via ->calls-> edges up to `depth` hops.
-    Returns list of {name, file, line} for all reachable nodes (excludes the source).
+    Reverse traversal via INCOMING edges (callers, importers, readers, etc.)
+    up to `depth` hops. Returns list of {name, file, line} for all reachable
+    dependents (excludes the source).
+
+    Seed nodes: the function node AND the file node (imports target files,
+    not individual symbols).
     """
     src = _make_rid(project, file, function)
-    visited = {str(src)}
-    frontier = [src]
+    file_rid = _make_rid(project, file, file)
+    visited = {str(src), str(file_rid)}
+    frontier = [src, file_rid] if str(src) != str(file_rid) else [src]
     collected = []
 
     for _ in range(depth):
         next_frontier = []
         for nid in frontier:
             rows = db.query(
-                "SELECT ->calls->code_node AS targets FROM $id",
+                "SELECT "
+                "  <-calls<-code_node AS callers, "
+                "  <-imports<-code_node AS importers, "
+                "  <-reads<-code_node AS readers, "
+                "  <-writes<-code_node AS writers, "
+                "  <-implements<-code_node AS implementors "
+                "FROM $id",
                 {"id": nid},
             )
-            if not rows or not rows[0].get("targets"):
+            if not rows:
                 continue
-            for target in rows[0]["targets"]:
+            targets = []
+            for key in ("callers", "importers", "readers", "writers", "implementors"):
+                targets.extend(rows[0].get(key) or [])
+            for target in targets:
                 if isinstance(target, dict):
                     tid = target.get("id", target)
                 else:
@@ -133,7 +164,6 @@ def code_blast_radius(db, project, file, function, depth=3):
                 if tid_str in visited:
                     continue
                 visited.add(tid_str)
-                # Fetch node details
                 node = db.query("SELECT name, file, line FROM $id", {"id": tid})
                 if node:
                     collected.append(
@@ -147,6 +177,133 @@ def code_blast_radius(db, project, file, function, depth=3):
         frontier = next_frontier
 
     return collected
+
+
+def code_query(db, project, question, mode="bfs", depth=2, budget=2000):
+    """Answer a codebase question by traversing the graph.
+
+    Scores nodes by term match, picks top seeds, runs BFS/DFS,
+    and returns a compact text summary within a token budget.
+    """
+    terms = [t.lower() for t in question.split() if len(t) > 2]
+    stop = {
+        "the",
+        "and",
+        "for",
+        "how",
+        "does",
+        "what",
+        "show",
+        "find",
+        "all",
+        "this",
+        "with",
+        "from",
+        "where",
+        "which",
+        "that",
+        "are",
+    }
+    terms = [t for t in terms if t not in stop]
+    if not terms:
+        return "No meaningful search terms found."
+
+    # Score all nodes by term match
+    conditions = []
+    params = {"proj": project}
+    for i, term in enumerate(terms[:6]):
+        key = f"t{i}"
+        params[key] = term
+        conditions.append(
+            f"(string::lowercase(name) CONTAINS ${key} OR string::lowercase(file) CONTAINS ${key})"
+        )
+    where = " OR ".join(conditions)
+    seeds = db.query(
+        f"SELECT id, name, file, line, type FROM code_node "
+        f"WHERE project=$proj AND ({where}) LIMIT 5",
+        params,
+    )
+    if not seeds:
+        return f"No nodes matching '{question}'."
+
+    seed_ids = [r["id"] for r in seeds]
+    visited = {str(s) for s in seed_ids}
+    frontier = list(seed_ids)
+    all_nodes = {str(r["id"]): r for r in seeds}
+    all_edges = []
+
+    for _ in range(depth):
+        next_frontier = []
+        for nid in frontier:
+            rows = db.query(
+                "SELECT "
+                "  ->calls->code_node AS fwd_c, <-calls<-code_node AS rev_c, "
+                "  ->imports->code_node AS fwd_i, <-imports<-code_node AS rev_i, "
+                "  ->reads->code_node AS fwd_r, <-reads<-code_node AS rev_r "
+                "FROM $id",
+                {"id": nid},
+            )
+            if not rows:
+                continue
+            edge_labels = [
+                ("fwd_c", "calls"),
+                ("rev_c", "called_by"),
+                ("fwd_i", "imports"),
+                ("rev_i", "imported_by"),
+                ("fwd_r", "reads"),
+                ("rev_r", "read_by"),
+            ]
+            for key, label in edge_labels:
+                for target in rows[0].get(key) or []:
+                    tid = (
+                        target.get("id", target) if isinstance(target, dict) else target
+                    )
+                    tid_str = str(tid)
+                    if tid_str not in all_nodes:
+                        node = db.query(
+                            "SELECT name, file, line, type FROM $id", {"id": tid}
+                        )
+                        if node:
+                            all_nodes[tid_str] = node[0]
+                    src_name = all_nodes.get(str(nid), {}).get("name", "?")
+                    tgt_name = all_nodes.get(tid_str, {}).get("name", "?")
+                    all_edges.append(f"{src_name} --{label}--> {tgt_name}")
+                    if tid_str not in visited:
+                        visited.add(tid_str)
+                        next_frontier.append(tid)
+        frontier = next_frontier
+        if mode == "dfs":
+            frontier = frontier[-3:] if frontier else []
+
+    # Render compact text within budget
+    char_budget = budget * 3
+    lines = [
+        f"Query: {question}",
+        f"Mode: {mode.upper()} depth={depth} | {len(all_nodes)} nodes, {len(all_edges)} edges",
+        "",
+    ]
+
+    lines.append("NODES:")
+    for _, data in sorted(
+        all_nodes.items(),
+        key=lambda x: -len([e for e in all_edges if x[1].get("name", "") in e]),
+    ):
+        lines.append(
+            f"  {data.get('name', '?')} [{data.get('type', '?')}] {data.get('file', '')}:{data.get('line', 0)}"
+        )
+
+    lines.append("")
+    lines.append("EDGES:")
+    seen_edges = set()
+    for e in all_edges:
+        if e not in seen_edges:
+            seen_edges.add(e)
+            lines.append(f"  {e}")
+
+    output = "\n".join(lines)
+    if len(output) > char_budget:
+        output = output[:char_budget] + f"\n... (truncated to ~{budget} tokens)"
+    return output
 
 
 def code_search(db, project, query, limit=15):
