@@ -39,6 +39,11 @@ def init_code_tables(db):
         "DEFINE INDEX IF NOT EXISTS code_node_vec ON code_node FIELDS embedding "
         "HNSW DIMENSION 4096 TYPE F32 DIST COSINE EFC 150 M 12"
     )
+    db.query("DEFINE TABLE IF NOT EXISTS code_process SCHEMALESS")
+    db.query("DEFINE TABLE IF NOT EXISTS step_in_process SCHEMALESS")
+    db.query(
+        "DEFINE INDEX IF NOT EXISTS process_project ON code_process FIELDS project"
+    )
 
 
 def _node_key(project, file, name):

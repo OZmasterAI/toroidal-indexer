@@ -29,6 +29,7 @@ from indexer.mcp_queries import (
     code_detect_changes as _code_detect_changes,
     code_hubs as _code_hubs,
     code_path as _code_path,
+    code_processes as _code_processes,
     code_query as _code_query,
     code_readers as _code_readers,
     code_search as _code_search,
@@ -194,6 +195,13 @@ def code_detect_changes(
     )
 
 
+@mcp.tool()
+@crash_proof
+def code_processes(project: str, query: str = "", limit: int = 20) -> list:
+    """Detected execution flows (entry point → terminal). Filter by query substring. Returns list of {label, step_count, cross_community, steps}."""
+    return _code_processes(_get_db(), project, query=query or None, limit=limit)
+
+
 # ── MCP Resources (pre-computed summaries, cheaper than GRAPH_REPORT.md) ──
 
 
@@ -263,6 +271,20 @@ def project_hubs(name: str) -> str:
     lines = [f"Top hubs for {name}:"]
     for h in hubs:
         lines.append(f"  {h['name']} deg={h['degree']} {h['file']}")
+    return "\n".join(lines)
+
+
+@mcp.resource("indexer://project/{name}/processes")
+def project_processes(name: str) -> str:
+    """Detected execution flows with step counts. ~200 tokens."""
+    db = _get_db()
+    procs = _code_processes(db, name, limit=20)
+    if not procs:
+        return f"No processes for {name}."
+    lines = [f"Execution flows for {name} ({len(procs)} shown):"]
+    for p in procs:
+        cross = " [cross-cluster]" if p.get("cross_community") else ""
+        lines.append(f"  [{p['step_count']} steps] {p['label']}{cross}")
     return "\n".join(lines)
 
 

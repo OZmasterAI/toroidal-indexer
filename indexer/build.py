@@ -258,6 +258,17 @@ def _run_clustering_safe(db, project_name):
         return {"clusters": 0}
 
 
+def _run_process_detection_safe(db, project_name):
+    try:
+        from indexer.process_detector import detect_processes, store_processes
+
+        procs = detect_processes(db, project_name)
+        store_processes(db, project_name, procs)
+        return {"processes": len(procs)}
+    except Exception:
+        return {"processes": 0}
+
+
 def _generate_report_safe(db, project_name, project_root):
     try:
         from indexer.graph_report import generate_report
@@ -290,6 +301,7 @@ def full_build(db, project_root, project_name, fast=False):
         summary = {"files_indexed": len(collected)}
 
     summary.update(_run_clustering_safe(db, project_name))
+    summary.update(_run_process_detection_safe(db, project_name))
     try:
         summary["embedded"] = _embed_nodes(db, project_name)
     except Exception:
@@ -317,6 +329,7 @@ def incremental_build(db, project_root, project_name, changed_files):
     summary = {"files_indexed": len(to_index)}
     if to_index:
         summary.update(_run_clustering_safe(db, project_name))
+        summary.update(_run_process_detection_safe(db, project_name))
         try:
             summary["embedded"] = _embed_nodes(db, project_name)
         except Exception:

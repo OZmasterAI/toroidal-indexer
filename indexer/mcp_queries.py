@@ -249,22 +249,19 @@ def _vector_seeds(db, project, question, limit=10):
         return []
 
 
-def _rrf_fuse(bm25_ranked, vector_ranked, k=60, top_n=5):
-    """Reciprocal Rank Fusion: merge two ranked lists into one.
+def _rrf_fuse(bm25_ranked, vector_ranked, *extra_ranked, k=60, top_n=5):
+    """Reciprocal Rank Fusion: merge ranked lists into one.
 
     Applies top-3-per-file aggregation to prevent files with many mediocre
     matches (e.g. test files) from outranking files with one strong hit.
     """
     scores = {}
     node_data = {}
-    for rank, node in enumerate(bm25_ranked):
-        nid = str(node["id"])
-        scores[nid] = scores.get(nid, 0) + 1.0 / (k + rank)
-        node_data[nid] = node
-    for rank, node in enumerate(vector_ranked):
-        nid = str(node["id"])
-        scores[nid] = scores.get(nid, 0) + 1.0 / (k + rank)
-        node_data[nid] = node
+    for ranked_list in [bm25_ranked, vector_ranked, *extra_ranked]:
+        for rank, node in enumerate(ranked_list):
+            nid = str(node["id"])
+            scores[nid] = scores.get(nid, 0) + 1.0 / (k + rank)
+            node_data[nid] = node
 
     # Top-3-per-file: only keep the 3 highest-scoring nodes from each file
     by_file = {}
@@ -279,6 +276,90 @@ def _rrf_fuse(bm25_ranked, vector_ranked, k=60, top_n=5):
 
     ranked = sorted(kept.items(), key=lambda x: -x[1])
     return [node_data[nid] for nid, _ in ranked[:top_n]]
+
+
+def _process_seeds(db, project, terms):
+    """Match query terms against process labels, extract step nodes as ranked list."""
+    if not terms:
+        return []
+    conditions = []
+    params = {"proj": project}
+    for i, term in enumerate(terms[:6]):
+        key = f"t{i}"
+        params[key] = term
+        conditions.append(f"string::lowercase(label) CONTAINS ${key}")
+    where = " OR ".join(conditions)
+    try:
+        procs = db.query(
+            f"SELECT id, label FROM code_process WHERE project=$proj AND ({where}) LIMIT 10",
+            params,
+        )
+    except Exception:
+        return []
+    if not procs:
+        return []
+    nodes = []
+    seen = set()
+    for proc in procs:
+        steps = db.query(
+            "SELECT ->step_in_process->code_node.* AS steps FROM $id ORDER BY step_order",
+            {"id": proc["id"]},
+        )
+        if not steps or not steps[0].get("steps"):
+            continue
+        for step in steps[0]["steps"]:
+            if isinstance(step, dict):
+                nid = str(step.get("id", ""))
+                if nid not in seen:
+                    seen.add(nid)
+                    nodes.append(step)
+    return nodes
+
+
+def code_processes(db, project, query=None, limit=20):
+    """List detected execution flows. Filter by query substring if provided."""
+    if query:
+        procs = db.query(
+            "SELECT * FROM code_process WHERE project=$p "
+            "AND string::lowercase(label) CONTAINS string::lowercase($q) "
+            "ORDER BY step_count DESC LIMIT $n",
+            {"p": project, "q": query, "n": limit},
+        )
+    else:
+        procs = db.query(
+            "SELECT * FROM code_process WHERE project=$p "
+            "ORDER BY step_count DESC LIMIT $n",
+            {"p": project, "n": limit},
+        )
+    if not procs:
+        return []
+    results = []
+    for proc in procs:
+        steps_raw = db.query(
+            "SELECT ->step_in_process->code_node.* AS steps FROM $id",
+            {"id": proc["id"]},
+        )
+        steps = []
+        if steps_raw and steps_raw[0].get("steps"):
+            for s in steps_raw[0]["steps"]:
+                if isinstance(s, dict):
+                    steps.append(
+                        {
+                            "name": s.get("name", "?"),
+                            "file": s.get("file", "?"),
+                            "line": s.get("line", 0),
+                        }
+                    )
+        results.append(
+            {
+                "label": proc["label"],
+                "process_type": proc.get("process_type", "execution_flow"),
+                "step_count": proc.get("step_count", 0),
+                "cross_community": proc.get("cross_community", False),
+                "steps": steps,
+            }
+        )
+    return results
 
 
 def code_query(db, project, question, mode="bfs", depth=2, budget=2000):
@@ -313,13 +394,16 @@ def code_query(db, project, question, mode="bfs", depth=2, budget=2000):
 
     bm25 = _bm25_seeds(db, project, terms, limit=10)
     vec = _vector_seeds(db, project, question, limit=10)
+    proc_nodes = _process_seeds(db, project, terms)
 
     if bm25 and vec:
-        seeds = _rrf_fuse(bm25, vec, top_n=5)
+        seeds = _rrf_fuse(bm25, vec, proc_nodes, top_n=5)
     elif bm25:
-        seeds = bm25[:5]
+        seeds = _rrf_fuse(bm25, [], proc_nodes, top_n=5) if proc_nodes else bm25[:5]
     elif vec:
-        seeds = vec[:5]
+        seeds = _rrf_fuse([], vec, proc_nodes, top_n=5) if proc_nodes else vec[:5]
+    elif proc_nodes:
+        seeds = proc_nodes[:5]
     else:
         return f"No nodes matching '{question}'."
 
@@ -586,10 +670,12 @@ def code_detect_changes(db, project, project_root, base_ref="HEAD~1", depth=2):
             "changed_files": [],
             "changed_symbols": [],
             "affected": [],
+            "flows_affected": [],
             "summary": {
                 "files_changed": 0,
                 "symbols_changed": 0,
                 "total_affected": 0,
+                "flows_hit": 0,
                 "risk": "NONE",
             },
         }
@@ -610,10 +696,12 @@ def code_detect_changes(db, project, project_root, base_ref="HEAD~1", depth=2):
             "changed_files": changed_files,
             "changed_symbols": [],
             "affected": [],
+            "flows_affected": [],
             "summary": {
                 "files_changed": len(changed_files),
                 "symbols_changed": 0,
                 "total_affected": 0,
+                "flows_hit": 0,
                 "risk": "LOW",
             },
         }
@@ -699,6 +787,48 @@ def code_detect_changes(db, project, project_root, base_ref="HEAD~1", depth=2):
     hub_names = {(h["name"], h["file"]) for h in hubs}
     hubs_hit = [a for a in deduped if (a["name"], a["file"]) in hub_names]
 
+    # Find execution flows affected by changed/affected nodes
+    flows_affected = []
+    affected_node_ids = set()
+    for sym in changed_symbols:
+        affected_node_ids.add(str(sym["id"]))
+    for a in deduped:
+        rid = _make_rid(project, a["file"], a["name"])
+        affected_node_ids.add(str(rid))
+    flow_seen = set()
+    for nid_str in list(affected_node_ids)[:50]:
+        try:
+            rows = db.query(
+                "SELECT <-step_in_process<-code_process AS flows FROM $id",
+                {
+                    "id": RecordID.parse(nid_str)
+                    if isinstance(nid_str, str)
+                    else nid_str
+                },
+            )
+        except Exception:
+            continue
+        if not rows or not rows[0].get("flows"):
+            continue
+        for flow in rows[0]["flows"]:
+            flow_id = flow if not isinstance(flow, dict) else flow.get("id", flow)
+            fid = str(flow_id)
+            if fid in flow_seen:
+                continue
+            flow_seen.add(fid)
+            flow_data = db.query(
+                "SELECT label, step_count, entry_id FROM $id",
+                {"id": flow_id},
+            )
+            if flow_data:
+                flows_affected.append(
+                    {
+                        "label": flow_data[0].get("label", "?"),
+                        "step_count": flow_data[0].get("step_count", 0),
+                        "entry_file": flow_data[0].get("entry_id", ""),
+                    }
+                )
+
     affected_files = {a["file"] for a in deduped}
     n_affected = len(deduped)
     if n_affected > 50 or hubs_hit:
@@ -718,11 +848,13 @@ def code_detect_changes(db, project, project_root, base_ref="HEAD~1", depth=2):
         ],
         "affected": deduped,
         "hubs_affected": [{"name": h["name"], "file": h["file"]} for h in hubs_hit],
+        "flows_affected": flows_affected,
         "summary": {
             "files_changed": len(changed_files),
             "symbols_changed": len(changed_symbols),
             "total_affected": n_affected,
             "affected_files": len(affected_files),
+            "flows_hit": len(flows_affected),
             "risk": risk,
         },
     }
