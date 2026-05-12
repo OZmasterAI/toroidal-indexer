@@ -1080,9 +1080,10 @@ def create_group(db, name, members, detect=None):
     """Create or update a project group."""
     if detect is None:
         detect = {"http": True, "lib": True, "grpc": True, "topic": True}
+    normalized = [m if isinstance(m, dict) else {"project": m} for m in members]
     db.query(
         "UPSERT project_group:⟨$n⟩ SET name=$n, members=$m, detect=$d",
-        {"n": name, "m": members, "d": detect},
+        {"n": name, "m": normalized, "d": detect},
     )
 
 
