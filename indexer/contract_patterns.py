@@ -226,12 +226,12 @@ CONTRACT_PATTERNS = {
                 "confidence": 0.95,
                 "contract_id_template": "grpc::{name}",
             },
-            # gRPC client stubs (consumer) — tightened: require gRPC-specific callees
+            # gRPC / on-chain client stubs (consumer)
             {
                 "name": "grpc_client",
                 "file_re": r"\.(ts|js|py|rs|go|java)$",
-                "name_re": r"(Client|Stub|Service|Rpc|grpc|proto)",
-                "callee_re": r"(grpc\.|\.grpc|ServiceClient|ServiceStub|_pb2_grpc\.|channel\.(unary|stream)|stub\.|\.connect\(|proto\.)",
+                "name_re": r"(Client|Stub|Service|Rpc|grpc|proto|Pool|Balance|Contract)",
+                "callee_re": r"(grpc\.|\.grpc|ServiceClient|ServiceStub|_pb2_grpc\.|channel\.(unary|stream)|stub\.|\.connect\(|proto\.|createPublicClient|getContractFactory|getContractAt|ethers\.|web3\.|viem)",
                 "role": "consumer",
                 "confidence": 0.7,
                 "contract_id_template": "grpc::{name}",

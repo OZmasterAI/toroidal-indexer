@@ -903,6 +903,36 @@ class TestPatternFalsePositives:
         assert result["role"] == "provider"
         assert result["pattern_name"] == "solidity_onchain"
 
+    def test_grpc_matches_viem_onchain_consumer(self):
+        """viem createPublicClient calls are on-chain contract consumers."""
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["grpc"]
+        result = match_pattern(
+            patterns,
+            file="lib/pool-balance.ts",
+            name="getClient",
+            node_type="function",
+            callees=["createPublicClient"],
+        )
+        assert result is not None
+        assert result["role"] == "consumer"
+
+    def test_grpc_matches_ethers_contract_consumer(self):
+        """ethers getContractFactory calls are on-chain contract consumers."""
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["grpc"]
+        result = match_pattern(
+            patterns,
+            file="scripts/deploy.ts",
+            name="deployContract",
+            node_type="function",
+            callees=["ethers.getContractFactory"],
+        )
+        assert result is not None
+        assert result["role"] == "consumer"
+
     def test_existing_http_patterns_unchanged(self):
         """Verify HTTP patterns still work correctly."""
         from indexer.contract_patterns import load_contract_patterns, match_pattern
