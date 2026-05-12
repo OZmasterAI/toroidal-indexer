@@ -671,11 +671,13 @@ def code_detect_changes(db, project, project_root, base_ref="HEAD~1", depth=2):
             "changed_symbols": [],
             "affected": [],
             "flows_affected": [],
+            "cross_project_impact": [],
             "summary": {
                 "files_changed": 0,
                 "symbols_changed": 0,
                 "total_affected": 0,
                 "flows_hit": 0,
+                "cross_projects_hit": 0,
                 "risk": "NONE",
             },
         }
@@ -697,11 +699,13 @@ def code_detect_changes(db, project, project_root, base_ref="HEAD~1", depth=2):
             "changed_symbols": [],
             "affected": [],
             "flows_affected": [],
+            "cross_project_impact": [],
             "summary": {
                 "files_changed": len(changed_files),
                 "symbols_changed": 0,
                 "total_affected": 0,
                 "flows_hit": 0,
+                "cross_projects_hit": 0,
                 "risk": "LOW",
             },
         }
@@ -840,6 +844,62 @@ def code_detect_changes(db, project, project_root, base_ref="HEAD~1", depth=2):
     else:
         risk = "LOW"
 
+    # Cross-project impact: find contracts on affected nodes
+    cross_project_impact = []
+    try:
+        affected_file_set = affected_files | set(changed_files)
+        affected_name_set = {s["name"] for s in changed_symbols} | {
+            a["name"] for a in deduped
+        }
+        cross_contracts = db.query(
+            "SELECT * FROM code_contract WHERE project=$p AND "
+            "(symbol_file IN $files OR symbol_name IN $names)",
+            {
+                "p": project,
+                "files": list(affected_file_set),
+                "names": list(affected_name_set),
+            },
+        )
+        if cross_contracts:
+            seen_cpi = set()
+            for cc in cross_contracts:
+                links = db.query(
+                    "SELECT ->contract_link->code_contract AS linked FROM $id",
+                    {"id": cc["id"]},
+                )
+                if not links or not links[0].get("linked"):
+                    links = db.query(
+                        "SELECT <-contract_link<-code_contract AS linked FROM $id",
+                        {"id": cc["id"]},
+                    )
+                if not links or not links[0].get("linked"):
+                    continue
+                for linked in links[0]["linked"]:
+                    if isinstance(linked, dict):
+                        lp = linked.get("project", "")
+                        cid = linked.get("contract_id", "")
+                    else:
+                        info = db.query(
+                            "SELECT project, contract_id FROM $id", {"id": linked}
+                        )
+                        if not info:
+                            continue
+                        lp = info[0].get("project", "")
+                        cid = info[0].get("contract_id", "")
+                    if lp == project:
+                        continue
+                    key = f"{lp}:{cid}"
+                    if key not in seen_cpi:
+                        seen_cpi.add(key)
+                        cross_project_impact.append(
+                            {
+                                "project": lp,
+                                "contract_id": cid,
+                            }
+                        )
+    except Exception:
+        pass
+
     return {
         "changed_files": changed_files,
         "changed_symbols": [
@@ -849,12 +909,230 @@ def code_detect_changes(db, project, project_root, base_ref="HEAD~1", depth=2):
         "affected": deduped,
         "hubs_affected": [{"name": h["name"], "file": h["file"]} for h in hubs_hit],
         "flows_affected": flows_affected,
+        "cross_project_impact": cross_project_impact,
         "summary": {
             "files_changed": len(changed_files),
             "symbols_changed": len(changed_symbols),
             "total_affected": n_affected,
             "affected_files": len(affected_files),
             "flows_hit": len(flows_affected),
+            "cross_projects_hit": len(cross_project_impact),
             "risk": risk,
         },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# Cross-repo contracts
+# ═══════════════════════════════════════════════════════════════
+
+
+def code_contracts(db, project, contract_type=None, role=None, limit=50):
+    """List contracts for a project. Optionally filter by type or role."""
+    conditions = ["project=$p"]
+    params = {"p": project, "lim": limit}
+    if contract_type:
+        conditions.append("contract_type=$ct")
+        params["ct"] = contract_type
+    if role:
+        conditions.append("role=$role")
+        params["role"] = role
+    where = " AND ".join(conditions)
+    rows = db.query(
+        f"SELECT * FROM code_contract WHERE {where} LIMIT $lim",
+        params,
+    )
+    if not rows:
+        return []
+    return [
+        {
+            "contract_id": r["contract_id"],
+            "contract_type": r["contract_type"],
+            "role": r["role"],
+            "symbol_name": r.get("symbol_name", ""),
+            "symbol_file": r.get("symbol_file", ""),
+            "confidence": r.get("confidence", 0),
+            "meta": r.get("meta", {}),
+        }
+        for r in rows
+    ]
+
+
+def code_group_impact(db, group_name, file, function, depth=2):
+    """Cross-project blast radius: local impact + impact on linked projects.
+
+    Phase 1: local blast_radius on the source project
+    Phase 2: find contracts on affected nodes via contract_link edges
+    Phase 3: for each linked contract in another project, run blast_radius there
+    """
+    # Find which project this file belongs to
+    group = db.query(
+        "SELECT * FROM project_group WHERE name=$n",
+        {"n": group_name},
+    )
+    if not group:
+        return {
+            "error": f"Group '{group_name}' not found",
+            "local": [],
+            "cross_repo": [],
+        }
+
+    members = group[0].get("members", [])
+    member_projects = {m["project"] for m in members}
+
+    # Find source project from the file
+    source_project = None
+    for m in members:
+        nodes = db.query(
+            "SELECT id FROM code_node WHERE project=$p AND file=$f LIMIT 1",
+            {"p": m["project"], "f": file},
+        )
+        if nodes:
+            source_project = m["project"]
+            break
+
+    if not source_project:
+        return {"local": [], "cross_repo": [], "source_project": None}
+
+    # Phase 1: local blast radius
+    local = code_blast_radius(db, source_project, file, function, depth=depth)
+
+    # Phase 2: find contracts on affected nodes
+    affected_files = {file} | {a["file"] for a in local}
+    affected_names = {function} | {a["name"] for a in local}
+
+    cross_contracts = db.query(
+        "SELECT * FROM code_contract WHERE project=$p AND "
+        "(symbol_file IN $files OR symbol_name IN $names)",
+        {
+            "p": source_project,
+            "files": list(affected_files),
+            "names": list(affected_names),
+        },
+    )
+
+    # Phase 3: follow contract_link edges to other projects
+    cross_repo = []
+    seen_projects = set()
+    for contract in cross_contracts or []:
+        links = db.query(
+            "SELECT ->contract_link->code_contract AS linked FROM $id",
+            {"id": contract["id"]},
+        )
+        if not links or not links[0].get("linked"):
+            # Try reverse direction too
+            links = db.query(
+                "SELECT <-contract_link<-code_contract AS linked FROM $id",
+                {"id": contract["id"]},
+            )
+        if not links or not links[0].get("linked"):
+            continue
+        for linked in links[0]["linked"]:
+            if isinstance(linked, dict):
+                linked_project = linked.get("project", "")
+                linked_file = linked.get("symbol_file", "")
+                linked_name = linked.get("symbol_name", "")
+            else:
+                info = db.query(
+                    "SELECT project, symbol_file, symbol_name FROM $id", {"id": linked}
+                )
+                if not info:
+                    continue
+                linked_project = info[0].get("project", "")
+                linked_file = info[0].get("symbol_file", "")
+                linked_name = info[0].get("symbol_name", "")
+
+            if (
+                linked_project == source_project
+                or linked_project not in member_projects
+            ):
+                continue
+
+            proj_key = f"{linked_project}:{linked_file}:{linked_name}"
+            if proj_key in seen_projects:
+                continue
+            seen_projects.add(proj_key)
+
+            remote_affected = code_blast_radius(
+                db,
+                linked_project,
+                linked_file,
+                linked_name,
+                depth=depth,
+            )
+            cross_repo.append(
+                {
+                    "project": linked_project,
+                    "contract_id": contract.get("contract_id", ""),
+                    "entry_point": {"file": linked_file, "name": linked_name},
+                    "affected": remote_affected,
+                }
+            )
+
+    return {
+        "source_project": source_project,
+        "local": local,
+        "cross_repo": cross_repo,
+    }
+
+
+def create_group(db, name, members, detect=None):
+    """Create or update a project group."""
+    if detect is None:
+        detect = {"http": True, "lib": True, "grpc": True, "topic": True}
+    db.query(
+        "UPSERT project_group:⟨$n⟩ SET name=$n, members=$m, detect=$d",
+        {"n": name, "m": members, "d": detect},
+    )
+
+
+def list_groups(db):
+    """List all project groups."""
+    rows = db.query("SELECT * FROM project_group ORDER BY name")
+    if not rows:
+        return []
+    return [
+        {
+            "name": r.get("name", ""),
+            "members": r.get("members", []),
+            "detect": r.get("detect", {}),
+        }
+        for r in rows
+    ]
+
+
+def group_status(db, name):
+    """Get group status with contract counts per member."""
+    group = db.query(
+        "SELECT * FROM project_group WHERE name=$n",
+        {"n": name},
+    )
+    if not group:
+        return {"error": f"Group '{name}' not found"}
+
+    g = group[0]
+    members_status = []
+    for m in g.get("members", []):
+        proj = m.get("project", "")
+        count = db.query(
+            "SELECT count() AS c FROM code_contract WHERE project=$p GROUP ALL",
+            {"p": proj},
+        )
+        links = db.query(
+            "SELECT count() AS c FROM contract_link "
+            "WHERE in.project=$p OR out.project=$p GROUP ALL",
+            {"p": proj},
+        )
+        members_status.append(
+            {
+                "project": proj,
+                "contracts": count[0]["c"] if count else 0,
+                "cross_links": links[0]["c"] if links else 0,
+            }
+        )
+
+    return {
+        "name": g.get("name", ""),
+        "members": members_status,
+        "detect": g.get("detect", {}),
     }

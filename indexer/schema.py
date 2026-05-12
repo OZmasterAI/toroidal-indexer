@@ -8,6 +8,7 @@ from surrealdb import RecordID, Surreal
 SURREAL_URL = os.environ.get("SURREAL_URL", "ws://127.0.0.1:8822")
 NAMESPACE = "code_graph"
 VALID_RELATIONS = frozenset({"calls", "imports", "reads", "writes", "implements"})
+VALID_CONTRACT_RELATIONS = frozenset({"contract_link"})
 
 
 def connect_code_graph(url=None, database="main"):
@@ -43,6 +44,22 @@ def init_code_tables(db):
     db.query("DEFINE TABLE IF NOT EXISTS step_in_process SCHEMALESS")
     db.query(
         "DEFINE INDEX IF NOT EXISTS process_project ON code_process FIELDS project"
+    )
+    # Cross-repo contract tables
+    db.query("DEFINE TABLE IF NOT EXISTS code_contract SCHEMALESS")
+    db.query("DEFINE TABLE IF NOT EXISTS contract_link SCHEMALESS")
+    db.query("DEFINE TABLE IF NOT EXISTS project_group SCHEMALESS")
+    db.query(
+        "DEFINE INDEX IF NOT EXISTS contract_project ON code_contract FIELDS project"
+    )
+    db.query(
+        "DEFINE INDEX IF NOT EXISTS contract_id_idx ON code_contract FIELDS project, contract_id"
+    )
+    db.query(
+        "DEFINE INDEX IF NOT EXISTS contract_link_dedup ON contract_link FIELDS in, out UNIQUE"
+    )
+    db.query(
+        "DEFINE INDEX IF NOT EXISTS group_name ON project_group FIELDS name UNIQUE"
     )
 
 

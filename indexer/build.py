@@ -269,6 +269,16 @@ def _run_process_detection_safe(db, project_name):
         return {"processes": 0}
 
 
+def _run_contract_detection_safe(db, project_name, project_root):
+    try:
+        from indexer.contract_extractor import detect_contracts
+
+        result = detect_contracts(db, project_name, project_root)
+        return {"contracts": result.get("contracts", 0)}
+    except Exception:
+        return {"contracts": 0}
+
+
 def _generate_report_safe(db, project_name, project_root):
     try:
         from indexer.graph_report import generate_report
@@ -302,6 +312,7 @@ def full_build(db, project_root, project_name, fast=False):
 
     summary.update(_run_clustering_safe(db, project_name))
     summary.update(_run_process_detection_safe(db, project_name))
+    summary.update(_run_contract_detection_safe(db, project_name, project_root))
     try:
         summary["embedded"] = _embed_nodes(db, project_name)
     except Exception:
@@ -330,6 +341,7 @@ def incremental_build(db, project_root, project_name, changed_files):
     if to_index:
         summary.update(_run_clustering_safe(db, project_name))
         summary.update(_run_process_detection_safe(db, project_name))
+        summary.update(_run_contract_detection_safe(db, project_name, project_root))
         try:
             summary["embedded"] = _embed_nodes(db, project_name)
         except Exception:

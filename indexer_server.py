@@ -26,13 +26,18 @@ from indexer.mcp_queries import (
     code_callers as _code_callers,
     code_cluster_members as _code_cluster_members,
     code_clusters as _code_clusters,
+    code_contracts as _code_contracts,
     code_detect_changes as _code_detect_changes,
+    code_group_impact as _code_group_impact,
     code_hubs as _code_hubs,
     code_path as _code_path,
     code_processes as _code_processes,
     code_query as _code_query,
     code_readers as _code_readers,
     code_search as _code_search,
+    create_group as _create_group,
+    group_status as _group_status,
+    list_groups as _list_groups,
 )
 
 # ── Transport config ──
@@ -200,6 +205,70 @@ def code_detect_changes(
 def code_processes(project: str, query: str = "", limit: int = 20) -> list:
     """Detected execution flows (entry point → terminal). Filter by query substring. Returns list of {label, step_count, cross_community, steps}."""
     return _code_processes(_get_db(), project, query=query or None, limit=limit)
+
+
+# ── Contract & Group Tools ──
+
+
+@mcp.tool()
+@crash_proof
+def code_contracts(
+    project: str, contract_type: str = "", role: str = "", limit: int = 50
+) -> list:
+    """List API contracts (HTTP routes, lib deps, gRPC, topics) for a project. Filter by type (http/lib/grpc/topic) or role (provider/consumer)."""
+    return _code_contracts(
+        _get_db(),
+        project,
+        contract_type=contract_type or None,
+        role=role or None,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+@crash_proof
+def code_group_impact(
+    group_name: str, file: str, function: str, depth: int = 2
+) -> dict:
+    """Cross-project blast radius. Phase 1: local impact. Phase 2: follow contract_link edges to other projects. Phase 3: blast radius in each linked project. Returns {local: [...], cross_repo: [{project, affected}]}."""
+    return _code_group_impact(
+        _get_db(),
+        group_name,
+        file=file,
+        function=function,
+        depth=depth,
+    )
+
+
+@mcp.tool()
+@crash_proof
+def code_group_create(name: str, members: list, detect: dict = None) -> str:
+    """Create or update a project group for cross-repo analysis. members: [{project, path}]."""
+    _create_group(_get_db(), name, members, detect)
+    return f"Group '{name}' created with {len(members)} members."
+
+
+@mcp.tool()
+@crash_proof
+def code_group_list() -> list:
+    """List all project groups."""
+    return _list_groups(_get_db())
+
+
+@mcp.tool()
+@crash_proof
+def code_group_status(name: str) -> dict:
+    """Get group status with contract counts per member project."""
+    return _group_status(_get_db(), name)
+
+
+@mcp.tool()
+@crash_proof
+def code_group_sync(name: str) -> dict:
+    """Sync a project group: detect contracts in all members, match cross-links, store edges. Returns summary."""
+    from indexer.contract_extractor import sync_group
+
+    return sync_group(_get_db(), name)
 
 
 # ── MCP Resources (pre-computed summaries, cheaper than GRAPH_REPORT.md) ──
