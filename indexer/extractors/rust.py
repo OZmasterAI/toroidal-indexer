@@ -1,18 +1,21 @@
-"""Rust extractor: regex-based code graph extraction (~70% coverage by design).
+"""Rust code graph extractor.
 
-Extracts use statements, mod declarations, impl blocks, pub use re-exports,
-and function definitions. Resolves crate paths via Cargo.toml workspace members.
-
-Known limitations (Tier 3 AI fills gaps):
-  - #[cfg(...)] conditional compilation: included but not evaluated
-  - Multi-level re-exports through external crates: missed
-  - Trait method dispatch: file-level only (which impl is unknown)
+Uses tree-sitter for structural extraction (functions, structs, enums,
+impl blocks, call edges) and regex for use/mod path resolution (crate::,
+super::, self::). Falls back to pure regex if tree-sitter is unavailable.
 """
 
 import os
 import re
 
 from indexer.extractors import Edge, Node
+
+try:
+    from indexer.extractors.rust_ts import extract_rust_ts
+
+    _HAS_TS_EXTRACTOR = True
+except ImportError:
+    _HAS_TS_EXTRACTOR = False
 
 # --- Regex patterns ---
 
@@ -48,12 +51,8 @@ RE_FN = re.compile(
 def extract_rust(file_path, project_root):
     """Extract nodes and edges from a Rust source file.
 
-    Args:
-        file_path: Absolute path to the .rs file.
-        project_root: Absolute path to the project root (contains Cargo.toml).
-
-    Returns:
-        (list[Node], list[Edge]) -- extracted graph elements.
+    Tree-sitter handles structural extraction (functions, structs, calls).
+    Regex handles use/mod path resolution. Results are merged.
     """
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
@@ -61,23 +60,33 @@ def extract_rust(file_path, project_root):
     except (OSError, IOError):
         return [], []
 
-    # Bail on truly empty content (but still return file node for whitespace-only)
     rel_path = os.path.relpath(file_path, project_root)
-    nodes = [Node(name=rel_path, file=rel_path, type="file", line=1)]
-    edges = []
 
     if not source.strip():
-        return nodes, edges
+        return [Node(name=rel_path, file=rel_path, type="file", line=1)], []
 
-    # Build a line-offset index for computing line numbers from match positions
+    file_dir = os.path.dirname(file_path)
+    import_edges = _extract_import_edges(source, rel_path, file_dir, project_root)
+
+    if _HAS_TS_EXTRACTOR:
+        ts_result = extract_rust_ts(source, rel_path, project_root)
+        if ts_result is not None:
+            ts_nodes, ts_edges = ts_result
+            return _merge_results(ts_nodes, ts_edges, import_edges)
+
+    return _extract_regex_only(source, rel_path, file_dir, project_root, import_edges)
+
+
+def _extract_import_edges(source, rel_path, file_dir, project_root):
+    """Extract import edges using regex (path resolution)."""
+    edges = []
+
     line_starts = [0]
     for i, ch in enumerate(source):
         if ch == "\n":
             line_starts.append(i + 1)
 
     def _lineno(pos):
-        """Return 1-based line number for a character position."""
-        # Skip leading whitespace/newlines that MULTILINE ^ may have consumed
         while pos < len(source) and source[pos] in (" ", "\t", "\n", "\r"):
             pos += 1
         lo, hi = 0, len(line_starts) - 1
@@ -89,9 +98,6 @@ def extract_rust(file_path, project_root):
                 hi = mid - 1
         return lo + 1
 
-    file_dir = os.path.dirname(file_path)
-
-    # --- Use statements ---
     for m in RE_USE.finditer(source):
         path = m.group(1)
         lineno = _lineno(m.start())
@@ -106,7 +112,6 @@ def extract_rust(file_path, project_root):
             )
         )
 
-    # --- Mod declarations ---
     for m in RE_MOD.finditer(source):
         mod_name = m.group(1)
         lineno = _lineno(m.start())
@@ -121,7 +126,6 @@ def extract_rust(file_path, project_root):
             )
         )
 
-    # --- Inline mod blocks (mod foo { ... }) ---
     for m in RE_MOD_INLINE.finditer(source):
         mod_name = m.group(1)
         lineno = _lineno(m.start())
@@ -136,7 +140,43 @@ def extract_rust(file_path, project_root):
             )
         )
 
-    # --- Impl blocks (trait for struct) ---
+    return edges
+
+
+def _merge_results(ts_nodes, ts_edges, import_edges):
+    """Merge tree-sitter nodes/edges with regex import edges, dedup by key."""
+    all_edges = list(ts_edges)
+    seen = {(e.source, e.target, e.relation) for e in all_edges}
+    for e in import_edges:
+        key = (e.source, e.target, e.relation)
+        if key not in seen:
+            all_edges.append(e)
+            seen.add(key)
+    return ts_nodes, all_edges
+
+
+def _extract_regex_only(source, rel_path, file_dir, project_root, import_edges):
+    """Pure regex fallback when tree-sitter is unavailable."""
+    nodes = [Node(name=rel_path, file=rel_path, type="file", line=1)]
+    edges = list(import_edges)
+
+    line_starts = [0]
+    for i, ch in enumerate(source):
+        if ch == "\n":
+            line_starts.append(i + 1)
+
+    def _lineno(pos):
+        while pos < len(source) and source[pos] in (" ", "\t", "\n", "\r"):
+            pos += 1
+        lo, hi = 0, len(line_starts) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if line_starts[mid] <= pos:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo + 1
+
     for m in RE_IMPL.finditer(source):
         trait_name = m.group(1)
         struct_name = m.group(2)
@@ -151,11 +191,9 @@ def extract_rust(file_path, project_root):
             )
         )
 
-    # --- Impl blocks (self, no trait) ---
     for m in RE_IMPL_SELF.finditer(source):
         struct_name = m.group(1)
         lineno = _lineno(m.start())
-        # Skip if this was already matched as a trait impl
         line_text = source[m.start() : source.find("\n", m.start())]
         if " for " in line_text:
             continue
@@ -169,18 +207,10 @@ def extract_rust(file_path, project_root):
             )
         )
 
-    # --- Function definitions ---
     for m in RE_FN.finditer(source):
         fn_name = m.group(1)
         lineno = _lineno(m.start())
-        nodes.append(
-            Node(
-                name=fn_name,
-                file=rel_path,
-                type="function",
-                line=lineno,
-            )
-        )
+        nodes.append(Node(name=fn_name, file=rel_path, type="function", line=lineno))
 
     return nodes, edges
 

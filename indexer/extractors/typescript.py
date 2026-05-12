@@ -1,7 +1,8 @@
-"""TypeScript/JavaScript regex-based code graph extractor.
+"""TypeScript/JavaScript code graph extractor.
 
-Extracts imports (ES modules + CommonJS), exports (functions, classes,
-default, named lists) and resolves relative paths to actual files.
+Uses tree-sitter for structural extraction (functions, classes, methods,
+call edges) and regex for import path resolution (ES modules, CommonJS,
+@/ aliases). Falls back to pure regex if tree-sitter is unavailable.
 """
 
 import os
@@ -9,6 +10,13 @@ import re
 from typing import Tuple
 
 from indexer.extractors import Edge, Node
+
+try:
+    from indexer.extractors.typescript_ts import extract_typescript_ts
+
+    _HAS_TS_EXTRACTOR = True
+except ImportError:
+    _HAS_TS_EXTRACTOR = False
 
 # --- Regex patterns ---
 
@@ -95,36 +103,39 @@ def _resolve_relative(import_path: str, source_dir: str, project_root: str) -> s
 def extract_typescript(file_path: str, project_root: str) -> Tuple[list, list]:
     """Extract nodes and edges from a TypeScript/JavaScript file.
 
-    Args:
-        file_path: Absolute path to the .ts/.tsx/.js/.jsx file.
-        project_root: Project root directory for resolving relative imports.
-
-    Returns:
-        (nodes, edges) where nodes are Node dataclasses and edges are Edge dataclasses.
+    Tree-sitter handles structural extraction (functions, classes, calls).
+    Regex handles import path resolution (@/ aliases, relative paths).
+    Results are merged with deduplication.
     """
-    nodes: list[Node] = []
-    edges: list[Edge] = []
-
     if not os.path.isfile(file_path):
-        return nodes, edges
+        return [], []
 
     filename = os.path.basename(file_path)
     source_dir = os.path.dirname(file_path)
 
-    # Read file content, handle binary/encoding errors
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
     except Exception:
-        return nodes, edges
+        return [], []
 
-    # Normalize to relative path (consistent with python/rust extractors)
     rel_path = os.path.relpath(file_path, project_root)
 
-    # File-level node (always present for readable files)
-    nodes.append(Node(name=filename, file=rel_path, type="file", line=1))
+    import_edges = _extract_import_edges(content, filename, source_dir, project_root)
 
-    # --- Extract imports (ES module style) ---
+    if _HAS_TS_EXTRACTOR:
+        ts_result = extract_typescript_ts(content, rel_path, project_root)
+        if ts_result is not None:
+            ts_nodes, ts_edges = ts_result
+            return _merge_results(ts_nodes, ts_edges, import_edges)
+
+    return _extract_regex_only(content, filename, rel_path, import_edges)
+
+
+def _extract_import_edges(content, filename, source_dir, project_root):
+    """Extract import edges using regex (path resolution)."""
+    edges = []
+
     for match in RE_IMPORT.finditer(content):
         module_path = match.group(1)
         line_no = content[: match.start()].count("\n") + 1
@@ -139,11 +150,9 @@ def extract_typescript(file_path: str, project_root: str) -> Tuple[list, list]:
             )
         )
 
-    # --- Extract require() calls ---
     for match in RE_REQUIRE.finditer(content):
         module_path = match.group(1)
         line_no = content[: match.start()].count("\n") + 1
-        # Avoid duplicates if the same line was already captured by RE_IMPORT
         if any(e.source_line == line_no and e.relation == "imports" for e in edges):
             continue
         target = _resolve_import(module_path, source_dir, project_root)
@@ -157,38 +166,53 @@ def extract_typescript(file_path: str, project_root: str) -> Tuple[list, list]:
             )
         )
 
-    # --- Extract exported functions ---
+    return edges
+
+
+def _merge_results(ts_nodes, ts_edges, import_edges):
+    """Merge tree-sitter nodes/edges with regex import edges, dedup by key."""
+    all_edges = list(ts_edges)
+    seen = {(e.source, e.target, e.relation) for e in all_edges}
+    for e in import_edges:
+        key = (e.source, e.target, e.relation)
+        if key not in seen:
+            all_edges.append(e)
+            seen.add(key)
+    return ts_nodes, all_edges
+
+
+def _extract_regex_only(content, filename, rel_path, import_edges):
+    """Pure regex fallback when tree-sitter is unavailable."""
+    nodes: list[Node] = []
+    edges: list[Edge] = list(import_edges)
+
+    nodes.append(Node(name=filename, file=rel_path, type="file", line=1))
+
     for match in RE_EXPORT_FUNCTION.finditer(content):
         name = match.group(1)
         line_no = content[: match.start()].count("\n") + 1
         nodes.append(Node(name=name, file=rel_path, type="function", line=line_no))
 
-    # --- Extract exported classes ---
     for match in RE_EXPORT_CLASS.finditer(content):
         name = match.group(1)
         line_no = content[: match.start()].count("\n") + 1
         nodes.append(Node(name=name, file=rel_path, type="class", line=line_no))
 
-    # --- Extract export default ---
     for match in RE_EXPORT_DEFAULT.finditer(content):
         name = match.group(1)
         line_no = content[: match.start()].count("\n") + 1
-        # Only add if not already captured as an export function/class
         existing_names = {n.name for n in nodes if n.type in ("function", "class")}
         if name not in existing_names:
-            # Check if it matches a function declaration in the file
             is_func = any(
                 m.group(1) == name for m in RE_FUNCTION_DECL.finditer(content)
             )
             node_type = "function" if is_func else "field"
             nodes.append(Node(name=name, file=rel_path, type=node_type, line=line_no))
 
-    # --- Extract export { A, B, C } lists ---
     for match in RE_EXPORT_LIST.finditer(content):
         names_str = match.group(1)
         line_no = content[: match.start()].count("\n") + 1
         for raw_name in names_str.split(","):
-            # Handle 'X as Y' — use original name
             name = raw_name.strip().split(" as ")[0].strip()
             if name and name.isidentifier():
                 existing_names = {n.name for n in nodes if n.type != "file"}

@@ -1,19 +1,21 @@
-"""Go regex-based code graph extractor.
+"""Go code graph extractor.
 
-Extracts imports (grouped and single-line), function definitions (with and
-without receivers), type definitions (struct/interface), and resolves internal
-imports via go.mod module path.
-
-Known limitations (Tier 2 LSP fills gaps):
-  - Interface satisfaction: cannot determine which types implement which interfaces
-  - Cross-package function calls: not tracked at T1 (no call graph)
-  - Build tags: included but not evaluated
+Uses tree-sitter for structural extraction (functions, types, methods,
+call edges) and regex for import path resolution (go.mod module paths).
+Falls back to pure regex if tree-sitter is unavailable.
 """
 
 import os
 import re
 
 from indexer.extractors import Edge, Node
+
+try:
+    from indexer.extractors.go_ts import extract_go_ts
+
+    _HAS_TS_EXTRACTOR = True
+except ImportError:
+    _HAS_TS_EXTRACTOR = False
 
 # --- Regex patterns ---
 
@@ -57,12 +59,8 @@ RE_FUNC = re.compile(
 def extract_go(file_path: str, project_root: str) -> tuple[list[Node], list[Edge]]:
     """Extract code graph nodes and edges from a Go source file.
 
-    Args:
-        file_path: Absolute path to the .go file.
-        project_root: Absolute path to the project root (contains go.mod).
-
-    Returns:
-        (nodes, edges) extracted from the file.
+    Tree-sitter handles structural extraction (functions, types, calls).
+    Regex handles import path resolution via go.mod. Results are merged.
     """
     if not os.path.isfile(file_path):
         return [], []
@@ -73,17 +71,27 @@ def extract_go(file_path: str, project_root: str) -> tuple[list[Node], list[Edge
     except OSError:
         return [], []
 
+    rel_path = os.path.relpath(file_path, project_root)
+
     if not source.strip():
-        rel_path = os.path.relpath(file_path, project_root)
         return [Node(name=rel_path, file=rel_path, type="file", line=1)], []
 
-    rel_path = os.path.relpath(file_path, project_root)
-    nodes: list[Node] = [Node(name=rel_path, file=rel_path, type="file", line=1)]
-    edges: list[Edge] = []
+    import_edges = _extract_import_edges(source, rel_path, project_root)
 
+    if _HAS_TS_EXTRACTOR:
+        ts_result = extract_go_ts(source, rel_path, project_root)
+        if ts_result is not None:
+            ts_nodes, ts_edges = ts_result
+            return _merge_results(ts_nodes, ts_edges, import_edges)
+
+    return _extract_regex_only(source, rel_path, import_edges)
+
+
+def _extract_import_edges(source, rel_path, project_root):
+    """Extract import edges using regex (go.mod path resolution)."""
+    edges = []
     module_path = _read_module_path(project_root)
 
-    # Line offset index for position→line conversion
     line_starts = [0]
     for i, ch in enumerate(source):
         if ch == "\n":
@@ -99,7 +107,6 @@ def extract_go(file_path: str, project_root: str) -> tuple[list[Node], list[Edge
                 hi = mid - 1
         return lo + 1
 
-    # --- Imports (grouped block) ---
     for m in RE_IMPORT_BLOCK.finditer(source):
         block = m.group(1)
         block_start = m.start(1)
@@ -118,7 +125,6 @@ def extract_go(file_path: str, project_root: str) -> tuple[list[Node], list[Edge
                 )
             )
 
-    # --- Imports (single-line) ---
     for m in RE_IMPORT_SINGLE.finditer(source):
         import_path = m.group(1)
         lineno = _lineno(m.start())
@@ -133,13 +139,46 @@ def extract_go(file_path: str, project_root: str) -> tuple[list[Node], list[Edge
             )
         )
 
-    # --- Type definitions (struct/interface) ---
+    return edges
+
+
+def _merge_results(ts_nodes, ts_edges, import_edges):
+    """Merge tree-sitter nodes/edges with regex import edges, dedup by key."""
+    all_edges = list(ts_edges)
+    seen = {(e.source, e.target, e.relation) for e in all_edges}
+    for e in import_edges:
+        key = (e.source, e.target, e.relation)
+        if key not in seen:
+            all_edges.append(e)
+            seen.add(key)
+    return ts_nodes, all_edges
+
+
+def _extract_regex_only(source, rel_path, import_edges):
+    """Pure regex fallback when tree-sitter is unavailable."""
+    nodes: list[Node] = [Node(name=rel_path, file=rel_path, type="file", line=1)]
+    edges: list[Edge] = list(import_edges)
+
+    line_starts = [0]
+    for i, ch in enumerate(source):
+        if ch == "\n":
+            line_starts.append(i + 1)
+
+    def _lineno(pos):
+        lo, hi = 0, len(line_starts) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if line_starts[mid] <= pos:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo + 1
+
     for m in RE_TYPE.finditer(source):
         name = m.group(1)
         lineno = _lineno(m.start())
         nodes.append(Node(name=name, file=rel_path, type="class", line=lineno))
 
-    # --- Methods (function with receiver) ---
     for m in RE_METHOD.finditer(source):
         receiver_type = m.group(1)
         method_name = m.group(2)
@@ -157,12 +196,9 @@ def extract_go(file_path: str, project_root: str) -> tuple[list[Node], list[Edge
             )
         )
 
-    # --- Top-level functions (no receiver) ---
     for m in RE_FUNC.finditer(source):
         func_name = m.group(1)
         lineno = _lineno(m.start())
-        # Skip if already captured as a method (RE_METHOD matches are a subset of lines
-        # that RE_FUNC would also match on the func keyword)
         if not any(n.name == func_name and n.line == lineno for n in nodes):
             nodes.append(
                 Node(name=func_name, file=rel_path, type="function", line=lineno)
