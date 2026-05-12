@@ -12,10 +12,8 @@ from indexer.extractors import Edge, Node
 
 try:
     from indexer.extractors.go_ts import extract_go_ts
-
-    _HAS_TS_EXTRACTOR = True
 except ImportError:
-    _HAS_TS_EXTRACTOR = False
+    extract_go_ts = None
 
 # --- Regex patterns ---
 
@@ -78,7 +76,7 @@ def extract_go(file_path: str, project_root: str) -> tuple[list[Node], list[Edge
 
     import_edges = _extract_import_edges(source, rel_path, project_root)
 
-    if _HAS_TS_EXTRACTOR:
+    if extract_go_ts is not None:
         ts_result = extract_go_ts(source, rel_path, project_root)
         if ts_result is not None:
             ts_nodes, ts_edges = ts_result

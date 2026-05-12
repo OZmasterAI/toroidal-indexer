@@ -9,10 +9,8 @@ from indexer.extractors import Edge, Node
 
 try:
     from tree_sitter_languages import get_parser
-
-    HAS_TREESITTER = True
 except ImportError:
-    HAS_TREESITTER = False
+    get_parser = None
 
 LANG_CONFIG = {
     "python": {
@@ -54,7 +52,7 @@ _PARSER_CACHE = {}
 
 def ts_parse(source, language):
     """Parse source into a tree-sitter Tree. Returns None on failure."""
-    if not HAS_TREESITTER:
+    if get_parser is None:
         return None
     try:
         if language not in _PARSER_CACHE:

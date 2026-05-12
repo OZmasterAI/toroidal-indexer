@@ -12,10 +12,8 @@ from indexer.extractors import Edge, Node
 
 try:
     from indexer.extractors.rust_ts import extract_rust_ts
-
-    _HAS_TS_EXTRACTOR = True
 except ImportError:
-    _HAS_TS_EXTRACTOR = False
+    extract_rust_ts = None
 
 # --- Regex patterns ---
 
@@ -68,7 +66,7 @@ def extract_rust(file_path, project_root):
     file_dir = os.path.dirname(file_path)
     import_edges = _extract_import_edges(source, rel_path, file_dir, project_root)
 
-    if _HAS_TS_EXTRACTOR:
+    if extract_rust_ts is not None:
         ts_result = extract_rust_ts(source, rel_path, project_root)
         if ts_result is not None:
             ts_nodes, ts_edges = ts_result

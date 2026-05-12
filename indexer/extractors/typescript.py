@@ -13,10 +13,8 @@ from indexer.extractors import Edge, Node
 
 try:
     from indexer.extractors.typescript_ts import extract_typescript_ts
-
-    _HAS_TS_EXTRACTOR = True
 except ImportError:
-    _HAS_TS_EXTRACTOR = False
+    extract_typescript_ts = None
 
 # --- Regex patterns ---
 
@@ -123,7 +121,7 @@ def extract_typescript(file_path: str, project_root: str) -> Tuple[list, list]:
 
     import_edges = _extract_import_edges(content, filename, source_dir, project_root)
 
-    if _HAS_TS_EXTRACTOR:
+    if extract_typescript_ts is not None:
         ts_result = extract_typescript_ts(content, rel_path, project_root)
         if ts_result is not None:
             ts_nodes, ts_edges = ts_result
