@@ -2,9 +2,22 @@
 
 Pass 1: exact match on normalized contract_id (skip same-project).
 Pass 2: wildcard match for scoped packages (e.g. @torus/* matches @torus/utils).
+Pass 3: on-chain fuzzy match — tokenize names and match on significant overlap.
 """
 
 import fnmatch
+import re
+
+_CAMEL_RE = re.compile(r"[A-Z][a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\b)|[a-z]+|[A-Z]+|\d+")
+
+
+def _tokenize_name(name):
+    """Split a name into lowercase tokens for fuzzy matching.
+
+    'getDistributorClient' -> {'get', 'distributor', 'client'}
+    'TRSDistributor' -> {'trs', 'distributor'}
+    """
+    return {t.lower() for t in _CAMEL_RE.findall(name) if len(t) >= 3}
 
 
 def build_provider_index(contracts):
@@ -77,5 +90,45 @@ def match_contracts(providers, consumers):
                                     "contract_id": provider_cid,
                                 }
                             )
+
+    # Pass 3: on-chain fuzzy match — tokenize names, match on significant overlap
+    onchain_providers = [p for p in providers if p.get("contract_type") == "onchain"]
+    onchain_consumers = [c for c in consumers if c.get("contract_type") == "onchain"]
+    if onchain_providers and onchain_consumers:
+        matched_pairs = {(id(l["consumer"]), id(l["provider"])) for l in links}
+        for consumer in onchain_consumers:
+            c_name = consumer["contract_id"].rsplit("::", 1)[-1]
+            c_tokens = _tokenize_name(c_name)
+            if not c_tokens:
+                continue
+            for provider in onchain_providers:
+                if provider["project"] == consumer["project"]:
+                    continue
+                if (id(consumer), id(provider)) in matched_pairs:
+                    continue
+                p_name = provider["contract_id"].rsplit("::", 1)[-1]
+                p_tokens = _tokenize_name(p_name)
+                if not p_tokens:
+                    continue
+                overlap = c_tokens & p_tokens
+                if not overlap:
+                    continue
+                score = len(overlap) / min(len(c_tokens), len(p_tokens))
+                if score < 0.3:
+                    continue
+                links.append(
+                    {
+                        "consumer": consumer,
+                        "provider": provider,
+                        "match_type": "fuzzy",
+                        "confidence": min(
+                            consumer.get("confidence", 1.0),
+                            provider.get("confidence", 1.0),
+                        )
+                        * score,
+                        "contract_id": provider["contract_id"],
+                    }
+                )
+                matched_pairs.add((id(consumer), id(provider)))
 
     return links

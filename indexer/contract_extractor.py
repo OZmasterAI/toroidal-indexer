@@ -50,7 +50,7 @@ def extract_contracts_structural(db, project, project_root=None):
 
         # Get callees for callee-based patterns
         callees = None
-        for contract_type_key in ("http", "grpc", "topic"):
+        for contract_type_key in ("http", "grpc", "topic", "onchain"):
             type_config = patterns.get(contract_type_key)
             if not type_config:
                 continue

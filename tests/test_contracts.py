@@ -888,8 +888,8 @@ class TestPatternFalsePositives:
         assert result is not None
         assert result["role"] == "consumer"
 
-    def test_solidity_function_matches_as_grpc_provider(self):
-        """Solidity public functions should register as on-chain API providers."""
+    def test_solidity_function_no_longer_matches_grpc(self):
+        """Solidity functions should NOT match as gRPC (moved to onchain type)."""
         from indexer.contract_patterns import load_contract_patterns, match_pattern
 
         patterns = load_contract_patterns()["grpc"]
@@ -899,30 +899,45 @@ class TestPatternFalsePositives:
             name="claim",
             node_type="function",
         )
-        assert result is not None
-        assert result["role"] == "provider"
-        assert result["pattern_name"] == "solidity_onchain"
+        assert result is None
 
-    def test_grpc_matches_viem_onchain_consumer(self):
-        """viem createPublicClient calls are on-chain contract consumers."""
+    def test_onchain_provider_matches_solidity_contract(self):
+        """Solidity contract declarations match as onchain providers."""
         from indexer.contract_patterns import load_contract_patterns, match_pattern
 
-        patterns = load_contract_patterns()["grpc"]
+        patterns = load_contract_patterns()["onchain"]
+        result = match_pattern(
+            patterns,
+            file="contracts/TRSDistributor.sol",
+            name="TRSDistributor",
+            node_type="class",
+        )
+        assert result is not None
+        assert result["role"] == "provider"
+        assert result["pattern_name"] == "solidity_contract"
+        assert "onchain::TRSDistributor" == result["contract_id"]
+
+    def test_onchain_consumer_matches_viem(self):
+        """viem createPublicClient calls match as onchain consumers."""
+        from indexer.contract_patterns import load_contract_patterns, match_pattern
+
+        patterns = load_contract_patterns()["onchain"]
         result = match_pattern(
             patterns,
             file="lib/pool-balance.ts",
-            name="getClient",
+            name="getDistributorClient",
             node_type="function",
             callees=["createPublicClient"],
         )
         assert result is not None
         assert result["role"] == "consumer"
+        assert result["pattern_name"] == "onchain_consumer"
 
-    def test_grpc_matches_ethers_contract_consumer(self):
-        """ethers getContractFactory calls are on-chain contract consumers."""
+    def test_onchain_consumer_matches_ethers(self):
+        """ethers getContractFactory calls match as onchain consumers."""
         from indexer.contract_patterns import load_contract_patterns, match_pattern
 
-        patterns = load_contract_patterns()["grpc"]
+        patterns = load_contract_patterns()["onchain"]
         result = match_pattern(
             patterns,
             file="scripts/deploy.ts",
@@ -932,6 +947,83 @@ class TestPatternFalsePositives:
         )
         assert result is not None
         assert result["role"] == "consumer"
+
+    def test_onchain_fuzzy_match_distributor(self):
+        """Fuzzy match: getDistributorClient <-> TRSDistributor via 'distributor' token."""
+        from indexer.contract_matcher import match_contracts
+
+        providers = [
+            {
+                "contract_id": "onchain::TRSDistributor",
+                "project": "contracts",
+                "contract_type": "onchain",
+                "role": "provider",
+                "confidence": 0.9,
+            }
+        ]
+        consumers = [
+            {
+                "contract_id": "onchain::getDistributorClient",
+                "project": "frontend",
+                "contract_type": "onchain",
+                "role": "consumer",
+                "confidence": 0.75,
+            }
+        ]
+        links = match_contracts(providers, consumers)
+        assert len(links) == 1
+        assert links[0]["match_type"] == "fuzzy"
+        assert links[0]["confidence"] > 0
+
+    def test_onchain_fuzzy_no_match_unrelated(self):
+        """Unrelated names should not fuzzy match."""
+        from indexer.contract_matcher import match_contracts
+
+        providers = [
+            {
+                "contract_id": "onchain::TRSDistributor",
+                "project": "contracts",
+                "contract_type": "onchain",
+                "role": "provider",
+                "confidence": 0.9,
+            }
+        ]
+        consumers = [
+            {
+                "contract_id": "onchain::fetchUserProfile",
+                "project": "frontend",
+                "contract_type": "onchain",
+                "role": "consumer",
+                "confidence": 0.75,
+            }
+        ]
+        links = match_contracts(providers, consumers)
+        assert len(links) == 0
+
+    def test_onchain_fuzzy_no_self_match(self):
+        """Same-project onchain contracts should not match."""
+        from indexer.contract_matcher import match_contracts
+
+        providers = [
+            {
+                "contract_id": "onchain::TRSDistributor",
+                "project": "contracts",
+                "contract_type": "onchain",
+                "role": "provider",
+                "confidence": 0.9,
+            }
+        ]
+        consumers = [
+            {
+                "contract_id": "onchain::getDistributorClient",
+                "project": "contracts",
+                "contract_type": "onchain",
+                "role": "consumer",
+                "confidence": 0.75,
+            }
+        ]
+        links = match_contracts(providers, consumers)
+        assert len(links) == 0
 
     def test_existing_http_patterns_unchanged(self):
         """Verify HTTP patterns still work correctly."""

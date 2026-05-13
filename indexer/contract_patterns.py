@@ -226,25 +226,40 @@ CONTRACT_PATTERNS = {
                 "confidence": 0.95,
                 "contract_id_template": "grpc::{name}",
             },
-            # gRPC / on-chain client stubs (consumer)
+            # gRPC client stubs (consumer) — pure gRPC only
             {
                 "name": "grpc_client",
                 "file_re": r"\.(ts|js|py|rs|go|java)$",
-                "name_re": r"(Client|Stub|Service|Rpc|grpc|proto|Pool|Balance|Contract)",
-                "callee_re": r"(grpc\.|\.grpc|ServiceClient|ServiceStub|_pb2_grpc\.|channel\.(unary|stream)|stub\.|\.connect\(|proto\.|createPublicClient|getContractFactory|getContractAt|ethers\.|web3\.|viem)",
+                "name_re": r"(Client|Stub|Service|Rpc|grpc|proto)",
+                "callee_re": r"(grpc\.|\.grpc|ServiceClient|ServiceStub|_pb2_grpc\.|channel\.(unary|stream)|stub\.|\.connect\(|proto\.)",
                 "role": "consumer",
                 "confidence": 0.7,
                 "contract_id_template": "grpc::{name}",
             },
-            # Solidity on-chain API provider — function nodes in .sol files
+        ],
+    },
+    "onchain": {
+        "normalize": "onchain",
+        "patterns": [
+            # Solidity contract declarations (provider)
             {
-                "name": "solidity_onchain",
+                "name": "solidity_contract",
                 "file_re": r"\.sol$",
                 "name_re": r".",
-                "node_type_re": r"function",
+                "node_type_re": r"class",
                 "role": "provider",
-                "confidence": 0.85,
-                "contract_id_template": "grpc::{name}",
+                "confidence": 0.9,
+                "contract_id_template": "onchain::{name}",
+            },
+            # On-chain consumers via ethers/web3/viem
+            {
+                "name": "onchain_consumer",
+                "file_re": r"\.(ts|js|py|rs|go)$",
+                "name_re": r"(Client|Contract|Pool|Balance|Distributor|Token|Staking|Factory|Bridge|Vault)",
+                "callee_re": r"(createPublicClient|getContractFactory|getContractAt|ethers\.|web3\.|viem|readContract|writeContract|getContract|deployContract)",
+                "role": "consumer",
+                "confidence": 0.75,
+                "contract_id_template": "onchain::{name}",
             },
         ],
     },
@@ -410,6 +425,12 @@ def normalize_contract_id(raw_id, contract_type):
         return raw_id.lower()
 
     if contract_type == "grpc":
+        parts = raw_id.rsplit("::", 1)
+        if len(parts) == 2:
+            return f"{parts[0].lower()}::{parts[1]}"
+        return raw_id.lower()
+
+    if contract_type == "onchain":
         parts = raw_id.rsplit("::", 1)
         if len(parts) == 2:
             return f"{parts[0].lower()}::{parts[1]}"
