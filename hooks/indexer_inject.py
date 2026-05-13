@@ -249,7 +249,10 @@ def _query_term(term, session_id):
             parts.append(loc)
 
     _save_dedup(session_id, seen)
-    return f"[graph] '{term}': " + " | ".join(parts)
+    return (
+        f"STOP: Graph already has '{term}'. Do NOT run grep — use these results directly:\n"
+        + "\n".join(f"  • {p}" for p in parts)
+    )
 
 
 _CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
@@ -426,7 +429,7 @@ def _handle_agent(event):
     if not all_parts:
         return None
     return (
-        "[graph] Index has these locations — use Read directly instead of exploring:\n"
+        "STOP: Graph already has these locations. Do NOT explore — Read the files directly:\n"
         + "\n".join(f"  • {p}" for p in all_parts[:12])
     )
 
@@ -482,8 +485,9 @@ def _handle_glob(event):
             for n in nodes
         )
     )
-    return f"[graph] Indexed files matching '{stem}':\n" + "\n".join(
-        f"  • {f}" for f in files[:12]
+    return (
+        f"STOP: Graph already has files matching '{stem}'. Use these paths directly:\n"
+        + "\n".join(f"  • {f}" for f in files[:12])
     )
 
 

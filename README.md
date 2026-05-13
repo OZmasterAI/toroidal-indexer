@@ -100,6 +100,57 @@ tests/               # 14 test files, ~120 tests
 indexer_server.py    # MCP server entry point
 ```
 
+## Claude Code Hook
+
+A sample PreToolUse hook is included at `examples/claude-hook/indexer_inject.py`. It intercepts Claude Code tool calls (Grep, Bash, Agent, Glob, Read, Edit, Write) and injects graph context so Claude uses indexed results instead of scanning the filesystem.
+
+### Setup
+
+1. Copy the hook:
+```bash
+cp examples/claude-hook/indexer_inject.py ~/.claude/hooks/indexer_inject.py
+```
+
+2. Add to `~/.claude/settings.json`:
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Grep|Bash|Agent|Glob|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/indexer_inject.py\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+3. Ensure `toroidal-indexer` is on your PYTHONPATH (or `pip install -e .` it).
+
+### What it does
+
+| Tool | Behavior |
+|------|----------|
+| Grep / Bash(grep) | Looks up the search term in the graph, returns exact file:line hits with callers |
+| Agent | Extracts identifiers from the prompt, returns matching graph nodes |
+| Glob | Matches file patterns against indexed files |
+| Read | On first read, injects file structure (functions, classes, exports) |
+| Edit / Write | Identifies the function being edited, injects its callers and field readers |
+
+The hook is fail-open (always exits 0) — if the graph has no data, the tool runs normally. When the graph has hits, it injects a directive like `STOP: Graph already has 'connectDB'. Do NOT run grep — use these results directly:` which steers Claude toward using the indexed data.
+
+### Environment variables
+
+- `SURREAL_URL` — SurrealDB connection (default: `ws://127.0.0.1:8822`)
+- `INDEXER_DB` — Database name (default: `main`)
+- `INDEXER_PROJECT` — Override project name (default: basename of `CLAUDE_PROJECT_DIR` or cwd)
+
 ## Testing
 
 ```bash

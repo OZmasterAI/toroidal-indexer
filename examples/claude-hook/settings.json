@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Grep|Bash|Agent|Glob|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/indexer_inject.py\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}
