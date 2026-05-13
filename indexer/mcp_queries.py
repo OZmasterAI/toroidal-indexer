@@ -511,20 +511,26 @@ def code_search(db, project, query, limit=15):
         "with",
         "from",
     }
-    terms = []
+    full_terms = []
+    stem_terms = []
     seen_terms = set()
     for t in raw_terms:
         if t in stop:
             continue
-        for candidate in (t, t[: max(4, len(t) // 2)], t[:4]):
-            if len(candidate) >= 3 and candidate not in seen_terms:
-                seen_terms.add(candidate)
-                terms.append(candidate)
+        if t not in seen_terms:
+            seen_terms.add(t)
+            full_terms.append(t)
+        stem = t[: max(4, len(t) // 2)]
+        if len(stem) >= 3 and stem != t and stem not in seen_terms:
+            seen_terms.add(stem)
+            stem_terms.append(stem)
+    terms = full_terms + stem_terms
     if not terms:
         return []
 
     conditions = []
-    params = {"proj": project, "lim": limit}
+    fetch_limit = max(limit * 10, 150)
+    params = {"proj": project, "lim": fetch_limit}
     for i, term in enumerate(terms[:8]):
         key = f"t{i}"
         params[key] = term
@@ -547,11 +553,23 @@ def code_search(db, project, query, limit=15):
         if key in seen:
             continue
         seen.add(key)
-        score = sum(
-            1
-            for t in terms
-            if t in r.get("name", "").lower() or t in r.get("file", "").lower()
-        )
+        name_l = r.get("name", "").lower()
+        file_l = r.get("file", "").lower()
+        score = 0.0
+        for t in full_terms:
+            if name_l == t:
+                score += 10
+            elif name_l.startswith(t) or name_l.endswith(t):
+                score += 5
+            elif t in name_l:
+                score += 3
+            elif t in file_l:
+                score += 1
+        for t in stem_terms:
+            if t in name_l:
+                score += 0.5
+            elif t in file_l:
+                score += 0.25
         if _is_test_file(r.get("file", "")):
             score *= 0.5
         scored.append((score, r))
@@ -563,7 +581,7 @@ def code_search(db, project, query, limit=15):
             "line": r.get("line", 0),
             "type": r.get("type", "unknown"),
         }
-        for _, r in scored
+        for _, r in scored[:limit]
     ]
 
 
